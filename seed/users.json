@@ -1,0 +1,19 @@
+{
+  "users": {
+    "youssef": {
+      "displayName": "Youssef",
+      "role": "admin",
+      "passwordHash": "pbkdf2_sha256$180000$xdalGkksY/srHJ3aB5tLRA==$B7XNrnyrTc7BCps9PtNm8hmoPQGW0Sndv7PBr/fLJ2s="
+    },
+    "backup": {
+      "displayName": "Backup operativo",
+      "role": "backup",
+      "passwordHash": "pbkdf2_sha256$180000$y8QWKeUMJ5hWj+Gpspfh4g==$RKj/hWFgnudZyMY8NoYuTyQ45FnkE8lau2eNUxI4+LE="
+    },
+    "fatturazione": {
+      "displayName": "Fatturazione",
+      "role": "billing",
+      "passwordHash": "pbkdf2_sha256$180000$6+DMj3QjSpynAQ7AXvhXeA==$7qLpDyFfPLKdgNe38QHW84174obNpjBvWiaH3C+yTN4="
+    }
+  }
+}

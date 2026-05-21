@@ -1,0 +1,14 @@
+ACCESSI TEMPORANEI V-TECH
+Cambia questi valori appena vuoi creare password definitive.
+
+Youssef (admin)
+utente: youssef
+password: kHN7_ATn3JoScg
+
+Backup operativo (backup)
+utente: backup
+password: XjXzOuWcM5-0WA
+
+Fatturazione (billing)
+utente: fatturazione
+password: izTBgG2z40pAzw

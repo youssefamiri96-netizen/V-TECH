@@ -1,0 +1,27 @@
+{
+  "vtech_path": "{DATA_DIR}/uploads/report_20260521_091128_006 - Outbound Report (PROD) (18).xlsx",
+  "active_rates_path": "{DATA_DIR}/uploads/active_rates.xlsx",
+  "brt_passive_path": "{DATA_DIR}/uploads/brt_passive.pdf",
+  "column_order": [
+    "Shipment",
+    "Orders",
+    "Route to Customer",
+    "Route To Address",
+    "Provincia",
+    "Service Level",
+    "Carrier Scelto",
+    "Late Ship Date",
+    "Early Delivery Date",
+    "Prenotazione Scarico",
+    "Note Text",
+    "Theoretical Pallets",
+    "Pallet Fatturati",
+    "Grand Total Shipment Ftp Wgt Kg",
+    "Costo Attivo",
+    "Freight Code",
+    "Extra BRT Totale",
+    "Costo Passivo",
+    "Margine",
+    "Miglior Vettore"
+  ]
+}
