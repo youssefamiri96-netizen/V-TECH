@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="it">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>V-Tech Transport Control Room</title>
+  <link rel="stylesheet" href="/styles.css?v=italy-map-fixed-points-20260522" />
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="eyebrow">Control Tower</span>
+      <img src="/vtech-logo.svg" alt="vtech" />
+    </div>
+    <nav class="nav" aria-label="Navigazione">
+      <button class="nav-item active" data-page="dashboard">Dashboard</button>
+      <button class="nav-item" data-page="planning">Pianificazione</button>
+      <button class="nav-item" data-page="groupage">Groupage</button>
+      <button class="nav-item" data-page="ftl">FTL</button>
+      <button class="nav-item" data-page="registry">Anagrafica clienti</button>
+      <button class="nav-item" data-page="billing">Fatturazione</button>
+      <button class="nav-item" data-page="admin">Admin</button>
+    </nav>
+    <div class="side-note">
+      <span>Operativita</span>
+      <p>Seleziona una o piu spedizioni e usa la barra azioni. Le tipologie restano separate per lavorare piu veloce.</p>
+    </div>
+    <div class="user-box">
+      <span id="currentUser">Accesso</span>
+      <button id="logoutBtn" type="button">Esci</button>
+    </div>
+    <button class="deleted-box" id="deletedBox" type="button" aria-label="Spedizioni eliminate">
+      <span>Spedizioni eliminate</span>
+      <strong id="deletedCount">0</strong>
+      <small>escluse dai prossimi import</small>
+    </button>
+  </aside>
+
+  <main class="shell">
+    <header class="hero">
+      <section>
+        <span class="eyebrow cyan">V-Tech Transport Control Room</span>
+        <h1 id="pageTitle">Spedizioni</h1>
+        <p id="pageSubtitle">Da pianificare, margini e assegnazione vettori</p>
+        <div class="chips">
+          <span>Live</span>
+          <span>BRT LTL</span>
+          <span>KN LTL/FTL</span>
+          <span>Margini</span>
+        </div>
+      </section>
+      <section class="hero-side">
+        <div class="actions">
+          <button class="primary" id="importBtn" hidden>Importa e calcola</button>
+          <button id="refreshTopBtn">Aggiorna ora</button>
+          <input id="reportUpload" type="file" accept=".xlsx,.xlsm,.xls" hidden />
+          <input id="activeUpload" type="file" accept=".xlsx,.xlsm,.xls" hidden />
+          <input id="brtUpload" type="file" accept=".pdf" hidden />
+          <button class="report-hero-btn" id="reportUploadBtn" type="button">Carica report</button>
+          <button id="activeUploadBtn" type="button" hidden>Carica tariffe attive</button>
+          <button id="brtUploadBtn" type="button" hidden>Carica passiva BRT</button>
+        </div>
+        <div class="hero-trend" id="heroTrend" aria-live="polite"></div>
+      </section>
+    </header>
+
+    <section class="source-strip" hidden>
+      <div class="source-head">
+        <strong>Report V-Tech</strong>
+        <span>Sorgente dati operativa sempre visibile</span>
+      </div>
+      <label>
+        <span>File attuale</span>
+        <input id="vtechPath" spellcheck="false" />
+      </label>
+      <input id="activePath" type="hidden" />
+      <input id="brtPath" type="hidden" />
+    </section>
+
+    <section class="metrics" id="metrics"></section>
+
+    <section class="workspace">
+      <div class="toolbar" id="shipmentToolbar">
+        <div class="search">
+          <span>Cerca</span>
+          <input id="searchInput" placeholder="Shipment, cliente, provincia, indirizzo..." />
+        </div>
+        <div class="selection-pill" id="selectionInfo">0 selezionate</div>
+      </div>
+      <div class="operation-bar action-dock" id="operationBar">
+        <details class="action-menu">
+          <summary aria-label="Apri azioni spedizioni">
+            <span>⋯</span>
+            <strong id="actionMenuCount">0</strong>
+          </summary>
+          <div class="action-menu-panel">
+            <div>
+              <span>Azioni spedizioni selezionate</span>
+              <strong>Spunta una o piu spedizioni, poi scegli cosa fare.</strong>
+            </div>
+            <div class="workflow-actions">
+              <button id="carrierBtn">Scegli vettore</button>
+              <button id="serviceLevelBtn">Service level</button>
+              <button id="manualPassiveBtn">Passiva manuale</button>
+              <button id="manualPalletsBtn">Bancali manuali</button>
+              <button id="unloadDateBtn">Data scarico</button>
+              <button id="activeUrgentBtn">Urgente attiva</button>
+              <button class="warning" data-action="planned">Pianificato</button>
+              <button data-action="unplanned">Da pianificare</button>
+              <button class="warning" id="restoreDeletedBtn" data-action="restore_deleted">Ripristina da pianificare</button>
+              <button class="success" id="departedBtn" data-action="departed">Comunicata BRT</button>
+              <button class="success" id="confirmedBtn" data-action="confirmed">FTL confermato</button>
+              <button class="success" id="deliveredBtn" data-action="delivered">Consegnata / XML</button>
+            </div>
+            <div class="utility-actions">
+              <button id="selectAllBtn">Seleziona visibili</button>
+              <button id="refreshBtn">Aggiorna dati</button>
+              <button class="danger ghost-danger" data-action="delete">Elimina selezionate</button>
+              <button class="danger ghost-danger" id="purgeDeletedBtn" data-action="purge_deleted">Elimina definitivamente</button>
+            </div>
+          </div>
+        </details>
+      </div>
+      <div class="departed-filters" id="departedFilters" hidden>
+        <label>
+          <span>Data spedizione</span>
+          <input type="date" id="departedDateFilter" />
+        </label>
+        <label>
+          <span>Cerca</span>
+          <input id="departedSearchInput" placeholder="Shipment, ordine, cliente, provincia..." />
+        </label>
+        <button id="todayDepartedFilter" type="button">Oggi</button>
+        <button id="clearDepartedFilters" type="button">Vedi tutto</button>
+        <div class="selection-pill" id="departedSelectionInfo">0 selezionate</div>
+      </div>
+      <div class="mail-panel" id="mailPanel" hidden>
+        <div>
+          <strong>Mail groupage BRT</strong>
+          <span>Genera la bozza Outlook con le spedizioni groupage pianificate nella Wave della data scelta.</span>
+        </div>
+        <label>
+          <span>Data Wave</span>
+          <input type="date" id="mailDate" />
+        </label>
+        <button class="primary" id="mailBtn">Genera Mail Groupage</button>
+      </div>
+      <div class="mail-panel" id="ftlMailPanel" hidden>
+        <div>
+          <strong>Mail FTL/LTL</strong>
+          <span>Genera la bozza Outlook con il dettaglio delle spedizioni FTL/LTL selezionate.</span>
+        </div>
+        <button class="primary" id="ftlMailBtn">Genera mail FTL</button>
+      </div>
+      <div class="reminder-panel" id="ftlReminderPanel" hidden></div>
+      <div id="content"></div>
+    </section>
+
+    <section class="detail-panel" id="detailPanel">
+      <strong>Dettaglio spedizione</strong>
+      <p>Seleziona una riga per vedere extra, note e tariffa applicata.</p>
+    </section>
+  </main>
+
+  <dialog id="carrierDialog">
+    <form method="dialog" class="modal">
+      <h2>Scegli vettore</h2>
+      <p>Il vettore verra applicato alle spedizioni selezionate.</p>
+      <select id="carrierSelect"></select>
+      <menu>
+        <button value="cancel">Annulla</button>
+        <button class="primary" value="apply" id="applyCarrierBtn">Applica</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="serviceLevelDialog">
+    <form method="dialog" class="modal">
+      <h2>Service level</h2>
+      <p>Imposta il service level sulle spedizioni selezionate. LTL passa nel groupage BRT.</p>
+      <select id="serviceLevelSelect">
+        <option value="LTL">LTL - Groupage BRT</option>
+        <option value="FTL">FTL - Diretta</option>
+      </select>
+      <menu>
+        <button value="cancel">Annulla</button>
+        <button class="primary" value="apply" id="applyServiceLevelBtn">Applica</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="manualPassiveDialog">
+    <form method="dialog" class="modal">
+      <h2>Passiva manuale</h2>
+      <p>Inserisci il prezzo concordato con il vettore. Il valore sostituisce la passiva da tariffario.</p>
+      <label class="modal-field">
+        <span>Costo passivo concordato</span>
+        <input id="manualPassiveInput" inputmode="decimal" placeholder="es. 450,00" />
+      </label>
+      <menu>
+        <button value="cancel">Annulla</button>
+        <button class="danger ghost-danger" value="clear" id="clearManualPassiveBtn">Togli manuale</button>
+        <button class="primary" value="apply" id="applyManualPassiveBtn">Applica</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="manualPalletsDialog">
+    <form method="dialog" class="modal">
+      <h2>Bancali manuali</h2>
+      <p>Modifica i bancali della spedizione. Il programma ricalcola subito attivo, passivo e margine.</p>
+      <label class="modal-field">
+        <span>Bancali da usare nel calcolo</span>
+        <input id="manualPalletsInput" inputmode="decimal" placeholder="es. 8" />
+      </label>
+      <menu>
+        <button value="cancel">Annulla</button>
+        <button class="danger ghost-danger" value="clear" id="clearManualPalletsBtn">Togli manuale</button>
+        <button class="primary" value="apply" id="applyManualPalletsBtn">Applica</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="unloadDateDialog">
+    <form method="dialog" class="modal">
+      <h2>Data scarico prenotato</h2>
+      <p>Inserisci il giorno in cui il mezzo deve scaricare. Quel giorno la riga verra evidenziata in FTL CONFERMATI.</p>
+      <label class="modal-field">
+        <span>Giorno scarico</span>
+        <input id="unloadDateInput" type="date" />
+      </label>
+      <menu>
+        <button value="cancel">Annulla</button>
+        <button class="danger ghost-danger" value="clear" id="clearUnloadDateBtn">Togli data</button>
+        <button class="primary" value="apply" id="applyUnloadDateBtn">Salva data</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <dialog id="activeUrgentDialog">
+    <form method="dialog" class="modal">
+      <h2>Urgent delivery</h2>
+      <p>Applica l'extra attivo urgente: 15 euro per pallet fatturato sulle spedizioni selezionate.</p>
+      <menu>
+        <button value="cancel">Annulla</button>
+        <button class="danger ghost-danger" value="clear" id="clearActiveUrgentBtn">Togli urgente</button>
+        <button class="primary" value="apply" id="applyActiveUrgentBtn">Applica urgente</button>
+      </menu>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/app.js?v=italy-map-fixed-points-20260522"></script>
+</body>
+</html>
