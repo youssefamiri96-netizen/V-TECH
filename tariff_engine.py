@@ -499,6 +499,64 @@ def parse_fuel_rate(value: Any) -> float | None:
     return number / 100
 
 
+def first_decimal_number(text: str) -> float | None:
+    match = re.search(r"\d+(?:[.,]\d+)?", text)
+    if not match:
+        return None
+    return to_float(match.group(0))
+
+
+def first_percent_value(text: str) -> float | None:
+    match = re.search(r"([+-]?\d+(?:[.,]\d+)?)\s*%", text)
+    if not match:
+        return None
+    number = to_float(match.group(1))
+    if number is None:
+        return None
+    return max(0.0, number / 100)
+
+
+def parse_active_extra_settings(wb: Any) -> ActiveExtraSettings:
+    settings = ActiveExtraSettings()
+    if "Additional extra charges" not in wb.sheetnames:
+        return settings
+    ws = wb["Additional extra charges"]
+    for row in ws.iter_rows(values_only=True):
+        text = clean_text(row[0] if row else "")
+        if not text:
+            continue
+        normalized = text.lower()
+        amount = first_decimal_number(text)
+        percent = first_percent_value(text)
+        if "tail lift" in normalized and amount is not None:
+            settings.tail_lift_groupage = amount
+        elif "fixed time slot" in normalized and "for amazon" in normalized:
+            if percent is not None:
+                settings.fixed_time_slot_percent = percent
+            amazon_match = re.search(r"amazon\s+([+-]?\d+(?:[.,]\d+)?)\s*%", normalized)
+            if amazon_match:
+                amazon_percent = to_float(amazon_match.group(1))
+                if amazon_percent is not None:
+                    settings.amazon_fixed_time_slot_percent = max(0.0, amazon_percent / 100)
+        elif "phone preadvise" in normalized and amount is not None:
+            settings.phone_preadvise = amount
+        elif "waiting time" in normalized and amount is not None:
+            settings.waiting_time_hour = amount
+        elif "ets" in normalized and percent is not None:
+            settings.ets_sicily_sardinia_percent = percent
+        elif "fix day delivery" in normalized and "amazon" in normalized and percent is not None:
+            settings.amazon_bkl_percent = percent
+        elif "remote area" in normalized and percent is not None:
+            settings.remote_area_percent = percent
+        elif "gdo delivery" in normalized and percent is not None:
+            settings.gdo_percent = percent
+        elif "urgent delivery" in normalized and amount is not None:
+            settings.urgent_per_pallet = amount
+        elif "2nd delivery" in normalized and percent is not None:
+            settings.second_delivery_returns_percent = percent
+    return settings
+
+
 def load_fuel_settings(path: Path | None) -> dict[str, dict[str, float]]:
     if not path or not path.exists():
         return {}
@@ -710,12 +768,37 @@ def requires_active_tail_lift(row: dict[str, Any] | None, is_gdo: bool, is_amazo
     return clean_text((row or {}).get("Attiva Sponda")).upper() in TRUE_VALUES
 
 
+def row_has_any_true(row: dict[str, Any] | None, keys: tuple[str, ...]) -> bool:
+    if not row:
+        return False
+    return any(clean_text(row.get(key)).upper() in TRUE_VALUES for key in keys)
+
+
+@dataclass
+class ActiveExtraSettings:
+    tail_lift_groupage: float = 10.00
+    fixed_time_slot_percent: float = 0.20
+    amazon_fixed_time_slot_percent: float = 0.40
+    phone_preadvise: float = 5.00
+    waiting_time_hour: float = 0.0
+    ets_sicily_sardinia_percent: float = 0.05
+    amazon_bkl_percent: float = 0.40
+    remote_area_percent: float = 0.40
+    gdo_percent: float = 0.20
+    urgent_per_pallet: float = 15.00
+    second_delivery_returns_percent: float = 1.00
+
+
+DEFAULT_ACTIVE_EXTRA_SETTINGS = ActiveExtraSettings()
+
+
 def active_extra_charges(
     province_code: str,
     shipment_row: dict[str, Any] | None,
     base_cost: float,
     billed_pallets: int,
     active_fuel_rate: float | None = None,
+    settings: ActiveExtraSettings = DEFAULT_ACTIVE_EXTRA_SETTINGS,
 ) -> list[tuple[str, str, float]]:
     extras: list[tuple[str, str, float]] = []
     is_amazon = is_amazon_customer(shipment_row)
@@ -729,31 +812,37 @@ def active_extra_charges(
 
     region = PROVINCE_TO_REGION.get(province_code, "")
     if region in ACTIVE_ETS_REGIONS:
-        add_percent("ETS Sicilia/Sardegna", 0.05)
+        add_percent("ETS Sicilia/Sardegna", settings.ets_sicily_sardinia_percent)
 
     if active_fuel_rate is not None and active_fuel_rate > 0:
         add_percent("Fuel attivo mese", active_fuel_rate)
 
     if is_gdo:
-        add_percent("GDO delivery and time slot booking", 0.20)
+        add_percent("GDO delivery and time slot booking", settings.gdo_percent)
+
+    if row_has_any_true(shipment_row, ("Remote Area", "Area Remota", "Localita Disagiata", "Consegna Disagiata")):
+        add_percent("Remote area", settings.remote_area_percent)
+
+    if row_has_any_true(shipment_row, ("2nd delivery", "Seconda Consegna", "Returns", "Reso", "Riconsegna")):
+        add_percent("2nd delivery and returns", settings.second_delivery_returns_percent)
 
     if has_freight_code(shipment_row, "BKV"):
         if is_amazon:
-            add_percent("BKV Amazon / fixed time slot", 0.40)
+            add_percent("BKV Amazon / fixed time slot", settings.amazon_fixed_time_slot_percent)
         else:
-            add_percent("BKV fixed time slot", 0.20)
+            add_percent("BKV fixed time slot", settings.fixed_time_slot_percent)
 
     if has_freight_code(shipment_row, "BKL") and is_amazon:
-        add_percent("Amazon BKL fix day delivery and time slot booking", 0.40)
+        add_percent("Amazon BKL fix day delivery and time slot booking", settings.amazon_bkl_percent)
 
     if requires_active_tail_lift(shipment_row, is_gdo, is_amazon):
-        add_fixed("Sponda idraulica groupage", 10.00)
+        add_fixed("Sponda idraulica groupage", settings.tail_lift_groupage)
 
     if has_freight_code(shipment_row, "BKL") and not is_gdo and not is_amazon:
-        add_fixed("Phone preadvise BKL", 5.00)
+        add_fixed("Phone preadvise BKL", settings.phone_preadvise)
 
     if is_active_urgent(shipment_row):
-        add_fixed("Urgent delivery", 15.00 * max(1, billed_pallets))
+        add_fixed("Urgent delivery", settings.urgent_per_pallet * max(1, billed_pallets))
 
     return extras
 
@@ -811,13 +900,19 @@ class ContractSlaResult:
 
 
 class ActiveRateCard:
-    def __init__(self, rates_by_province: dict[str, dict[str, Any]]) -> None:
+    def __init__(
+        self,
+        rates_by_province: dict[str, dict[str, Any]],
+        extra_settings: ActiveExtraSettings | None = None,
+    ) -> None:
         self.rates_by_province = rates_by_province
+        self.extra_settings = extra_settings or ActiveExtraSettings()
 
     @classmethod
     def from_excel(cls, path: Path) -> "ActiveRateCard":
         wb = load_workbook(path, read_only=True, data_only=True)
         ws = wb["Rate card+LT for transportation"]
+        extra_settings = parse_active_extra_settings(wb)
         rows = ws.iter_rows(min_row=4, values_only=True)
         headers = [clean_text(value) for value in next(rows)]
         rates: dict[str, dict[str, Any]] = {}
@@ -833,7 +928,7 @@ class ActiveRateCard:
             rates[province_code] = row
 
         wb.close()
-        return cls(rates)
+        return cls(rates, extra_settings)
 
     def calculate(
         self,
@@ -867,6 +962,7 @@ class ActiveRateCard:
             base_cost,
             billed_pallets,
             active_fuel_rate=active_fuel_rate,
+            settings=self.extra_settings,
         )
         total_extra = round(sum(amount for _name, _rate_label, amount in extra_amounts), 2)
         final_cost = round(base_cost + total_extra, 2)
