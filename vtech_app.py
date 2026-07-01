@@ -3086,6 +3086,31 @@ def export_passive_billing_by_carrier(
     return output_path
 
 
+# Traduzione EN delle etichette extra: usata SOLO nell'export attivo destinato al
+# cliente. L'export passivo verso i vettori resta in italiano. Le chiavi restano
+# quelle di billing_extra_label, quindi il match dei valori non cambia: qui si
+# traduce esclusivamente il testo dell'intestazione.
+ACTIVE_EXTRA_EN = {
+    "Traghetti": "Ferry",
+    "Consegna GDO": "GDO delivery",
+    "Sponda": "Tail lift",
+    "Preavviso": "Phone preadvise",
+    "Appuntamento": "Appointment",
+    "Servizio 10:30": "10:30 service",
+    "Contrassegno": "Cash on delivery",
+    "Fuori misura": "Oversize",
+    "Ricerca documenti": "Document search",
+    "Bancali a rendere": "Returnable pallets",
+    "Riconsegna giacenza": "Storage re-delivery",
+    "Giacenza": "Storage",
+    "Dirottamento": "Rerouting",
+    "Localita disagiata": "Remote locality",
+    "Consegna disagiata": "Difficult delivery",
+    "Isole minori": "Minor islands",
+    "Zona franca": "Free zone",
+}
+
+
 def export_active_billing_report(
     month_key: str | None = None,
     db_path: Path = DB_PATH,
@@ -3117,11 +3142,11 @@ def export_active_billing_report(
 
     workbook = Workbook()
     summary = workbook.active
-    summary.title = "Riepilogo"
-    workbook.properties.title = "V-Tech fatturazione attiva"
-    workbook.properties.subject = "Dettaglio fatturazione attiva cliente"
+    summary.title = "Summary"
+    workbook.properties.title = "V-Tech active billing"
+    workbook.properties.subject = "Client active billing detail"
 
-    summary_headers = ["Cliente", "Spedizioni", "Base attiva", "Extra attivi", "Attivo totale", "Pallet fatt.", "Peso totale kg", "Volume totale m3"]
+    summary_headers = ["Customer", "Shipments", "Active base", "Active extras", "Active total", "Billed pallets", "Total weight kg", "Total volume m3"]
     summary.append(summary_headers)
     for customer, customer_rows in sorted(by_customer.items()):
         active = sum(to_float(row.get("Costo Attivo")) or 0 for _date, row in customer_rows)
@@ -3134,7 +3159,7 @@ def export_active_billing_report(
 
     total_row = summary.max_row + 1
     summary.append([
-        "Totale",
+        "Total",
         f"=SUM(B2:B{total_row - 1})",
         f"=SUM(C2:C{total_row - 1})",
         f"=SUM(D2:D{total_row - 1})",
@@ -3151,35 +3176,35 @@ def export_active_billing_report(
     summary_table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True, showFirstColumn=False, showLastColumn=False)
     summary.add_table(summary_table)
 
-    detail = workbook.create_sheet("Dettaglio attivo")
+    detail = workbook.create_sheet("Active detail")
     active_extra_columns = billing_extra_columns(selected, "Extra Attivi Applicati")
     active_base_headers = [
-        "Data rif.",
+        "Ref. date",
         "Shipment",
-        "Ordine",
-        "Cliente",
+        "Order",
+        "Customer",
         "GDO",
-        "Provincia",
-        "Indirizzo consegna",
-        "Servizio",
-        "Vettore",
+        "Province",
+        "Delivery address",
+        "Service",
+        "Carrier",
         "Freight",
-        "Prenotazione",
-        "Pallet fatt.",
-        "Peso totale kg",
-        "Volume totale m3",
+        "Booking",
+        "Billed pallets",
+        "Total weight kg",
+        "Total volume m3",
     ]
     active_price_headers = [
-        "Base attiva",
-        *active_extra_columns,
-        "Attivo totale",
+        "Active base",
+        *[ACTIVE_EXTRA_EN.get(column, column) for column in active_extra_columns],
+        "Active total",
     ]
     detail_headers = [
         *active_base_headers,
         *active_price_headers,
-        "Extra attivi applicati",
-        "Tariffa attiva",
-        "Stato",
+        "Applied active extras",
+        "Active rate",
+        "Status",
     ]
     detail.append(detail_headers)
     active_group_fills: list[tuple[int, int, PatternFill]] = []
@@ -3221,7 +3246,7 @@ def export_active_billing_report(
 
     total = detail.max_row + 1
     total_values = [""] * len(detail_headers)
-    total_values[0] = "Totale"
+    total_values[0] = "Total"
     for column_index in [12, 13, 14]:
         total_values[column_index - 1] = sum_formula(column_index, total)
     price_start = len(active_base_headers) + 1
