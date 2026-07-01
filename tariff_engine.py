@@ -143,6 +143,17 @@ SLA_CUTOFF = time(12, 30)
 SLA_PREP_WITHIN_CUTOFF_HOURS = 48
 SLA_PREP_AFTER_CUTOFF_HOURS = 72
 DEFAULT_PASSIVE_FUEL_RATE = 0.02
+
+# --- Indicizzazione ISTAT annua sull'attiva (revisione contrattuale) ---
+# Valore per il 2026. A gennaio va aggiornato l'indice (ed eventualmente reso
+# configurabile per anno). Regola concordata con il cliente:
+#   - nolo base: l'indice si applica solo sul 75% del nolo (il restante 25% e'
+#     la quota carburante, gestita a parte con il fuel surcharge);
+#   - extra:     l'indice si applica sul 100% dell'importo di ogni extra.
+ACTIVE_ISTAT_INDEX_RATE = 0.0139
+ACTIVE_ISTAT_BASE_FRACTION = 0.75
+ACTIVE_ISTAT_BASE_FACTOR = 1 + ACTIVE_ISTAT_INDEX_RATE * ACTIVE_ISTAT_BASE_FRACTION  # 1.010425
+ACTIVE_ISTAT_EXTRA_FACTOR = 1 + ACTIVE_ISTAT_INDEX_RATE  # 1.0139
 DEFAULT_CARRIER_TARIFFS_PATH = Path(__file__).resolve().parent / "data" / "carrier_tariffs.csv"
 
 BRT_EXTRA_FLAG_COLUMNS = [
@@ -955,25 +966,41 @@ class ActiveRateCard:
         if cost is None:
             return None
 
-        base_cost = round(cost, 2)
+        raw_base_cost = round(cost, 2)
+        # Gli extra vengono calcolati sul nolo base NON indicizzato (percentuali e
+        # importi fissi come da tariffario); l'indice viene applicato dopo.
         extra_amounts = active_extra_charges(
             province_code,
             shipment_row,
-            base_cost,
+            raw_base_cost,
             billed_pallets,
             active_fuel_rate=active_fuel_rate,
             settings=self.extra_settings,
         )
-        total_extra = round(sum(amount for _name, _rate_label, amount in extra_amounts), 2)
+
+        # Indicizzazione ISTAT: base sul 75%, extra sul 100%.
+        base_cost = round(raw_base_cost * ACTIVE_ISTAT_BASE_FACTOR, 2)
+        indexed_extra_amounts = [
+            (name, rate_label, round(amount * ACTIVE_ISTAT_EXTRA_FACTOR, 2))
+            for name, rate_label, amount in extra_amounts
+        ]
+        total_extra = round(sum(amount for _name, _rate_label, amount in indexed_extra_amounts), 2)
         final_cost = round(base_cost + total_extra, 2)
 
-        label = f"Attiva {province_code}: {column}, {billed_pallets} pallet fatturati; base EUR {base_cost:.2f}"
-        if extra_amounts:
+        index_note = (
+            f"indice ISTAT {ACTIVE_ISTAT_INDEX_RATE * 100:.2f}% "
+            f"(nolo su {ACTIVE_ISTAT_BASE_FRACTION * 100:.0f}%, extra su 100%)"
+        )
+        label = (
+            f"Attiva {province_code}: {column}, {billed_pallets} pallet fatturati; "
+            f"nolo base EUR {raw_base_cost:.2f} indicizzato EUR {base_cost:.2f} [{index_note}]"
+        )
+        if indexed_extra_amounts:
             extras_label = ", ".join(
                 f"{f'{name} {rate_label}'.strip()} EUR {amount:.2f}"
-                for name, rate_label, amount in extra_amounts
+                for name, rate_label, amount in indexed_extra_amounts
             )
-            label = f"{label}; extra attiva: {extras_label}; totale EUR {final_cost:.2f}"
+            label = f"{label}; extra attiva indicizzati: {extras_label}; totale EUR {final_cost:.2f}"
         return ActiveRateResult(
             cost=final_cost,
             billed_pallets=billed_pallets,
@@ -981,7 +1008,7 @@ class ActiveRateCard:
             extra_cost=total_extra,
             extras=[
                 f"{f'{name} {rate_label}'.strip()}: EUR {amount:.2f}"
-                for name, rate_label, amount in extra_amounts
+                for name, rate_label, amount in indexed_extra_amounts
             ],
         )
 
