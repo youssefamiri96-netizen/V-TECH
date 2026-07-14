@@ -2513,6 +2513,125 @@ def set_manual_pallets(
     return row
 
 
+def remove_order_from_shipment(
+    shipment: str,
+    order_to_remove: str,
+    active_rates_path: Path | None,
+    brt_passive_path: Path | None,
+    remaining_goods_weight: Any = None,
+    remaining_pallets: Any = None,
+    remaining_volume: Any = None,
+    db_path: Path = DB_PATH,
+) -> dict[str, Any]:
+    """Toglie UNO degli ordini raggruppati nello stesso Shipment.
+
+    - Rimuove l'ordine dalla lista "Orders" tenendo gli altri.
+    - Riduce peso merce, volume e pallet in base ai valori del carico che resta:
+      il report NON tiene il peso per singolo ordine (e' un totale di spedizione),
+      quindi i residui vanno indicati, altrimenti il passivo BRT resterebbe sul
+      peso pieno. Se un valore residuo non viene passato, quel dato resta invariato.
+    - Registra l'ordine rimosso tra gli esclusi (meccanismo deleted_orders gia'
+      esistente) cosi' non rientra ai prossimi import se ripresentato da solo.
+    - Ricalcola attivo/passivo/margine e salva, riusando lo stesso percorso di
+      set_manual_pallets.
+    """
+    row = get_shipment_from_db(shipment, db_path)
+    if row is None:
+        raise ValueError(f"Spedizione non trovata: {shipment}")
+
+    orders_text = clean_text(row.get("Orders"))
+    orders = [token.strip() for token in re.split(r"[,;/]+", orders_text) if token.strip()]
+    target_key = normalized_order_key(order_to_remove)
+    if not target_key:
+        raise ValueError("Indica l'ordine da togliere.")
+    remaining_orders = [o for o in orders if normalized_order_key(o) != target_key]
+    if len(remaining_orders) == len(orders):
+        raise ValueError(
+            f"L'ordine {order_to_remove} non e' tra gli ordini dello shipment {shipment} ({orders_text})."
+        )
+    if not remaining_orders:
+        raise ValueError("Non puoi togliere l'unico ordine dello shipment: usa Elimina spedizione.")
+
+    # 1) Ordini che restano
+    row["Orders"] = ", ".join(remaining_orders)
+
+    # 2) Peso merce / volume / pallet del carico che resta
+    if clean_text(remaining_goods_weight) != "":
+        row["Peso Merce Kg"] = to_float(remaining_goods_weight)
+        row["Peso Bancali Kg"] = ""  # verra' ricalcolato dai pallet
+        row["Grand Total Shipment Ftp Wgt Kg"] = to_float(remaining_goods_weight)
+    if clean_text(remaining_volume) != "":
+        row["Volume Merce m3"] = to_float(remaining_volume)
+        row["Volume Bancali m3"] = ""
+        row["Grand Total Shipment Ftp Vol m3"] = to_float(remaining_volume)
+    manual_pallets = None
+    if clean_text(remaining_pallets) != "":
+        manual_pallets = apply_manual_pallets_to_row(row, remaining_pallets)
+
+    # 3) Ricalcolo tariffe (identico a set_manual_pallets)
+    apply_tariffs_to_shipments(
+        [row],
+        active_rates_path=active_rates_path if active_rates_path and active_rates_path.exists() else None,
+        brt_passive_pdf_path=brt_passive_path if brt_passive_path and brt_passive_path.exists() else None,
+        brt_extra_flags_path=BRT_EXTRA_FLAGS_PATH,
+        gdo_customers_path=available_gdo_customers_path(),
+        fuel_settings_path=available_fuel_settings_path(),
+    )
+    if manual_pallets is not None:
+        apply_manual_pallets_to_row(row, manual_pallets)
+    if to_float(row.get("Costo Passivo Manuale")) is not None:
+        apply_manual_passive_to_row(row)
+
+    manual_pallets_val = to_float(row.get("Pallet Manuali"))
+    manual_passive_val = to_float(row.get("Costo Passivo Manuale"))
+
+    # 4) Esclusione dell'ordine rimosso. Chiave sintetica: NON e' un vero shipment,
+    #    quindi non blocca lo shipment che resta, ma alimenta deleted_orders.
+    exclusion_key = f"{shipment}::rimosso::{target_key}"
+    exclusion_payload = serialize_shipment_payload(
+        {"Shipment": exclusion_key, "Orders": clean_text(order_to_remove)}
+    )
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 5) Salvataggio
+    init_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE shipments
+            SET orders_text = ?,
+                active_cost = ?,
+                passive_cost = ?,
+                margin = ?,
+                manual_pallets = ?,
+                manual_passive_cost = ?,
+                payload_json = ?
+            WHERE shipment = ?
+            """,
+            (
+                row["Orders"],
+                to_float(row.get("Costo Attivo")),
+                to_float(row.get("Costo Passivo")),
+                to_float(row.get("Margine")),
+                manual_pallets_val,
+                manual_passive_val,
+                serialize_shipment_payload(row),
+                shipment,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO deleted_shipments (shipment, deleted_at, payload_json)
+            VALUES (?, ?, ?)
+            ON CONFLICT(shipment) DO UPDATE SET
+                deleted_at = excluded.deleted_at,
+                payload_json = excluded.payload_json
+            """,
+            (exclusion_key, stamp, exclusion_payload),
+        )
+    return row
+
+
 def set_unload_date(
     shipment: str,
     unload_date: Any,
