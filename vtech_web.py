@@ -72,6 +72,7 @@ from vtech_app import (
     set_manual_carrier,
     set_manual_freight_code,
     set_manual_pallets,
+    remove_order_from_shipment,
     set_manual_passive_cost,
     set_manual_service_level,
     set_required_delivery_date,
@@ -1930,6 +1931,24 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             pallets = body.get("pallets")
             for shipment in shipments:
                 set_manual_pallets(shipment, pallets, active_path, brt_path, clear=clear_manual)
+        elif action == "remove_order":
+            settings = load_settings()
+            active_path = Path(settings.get("active_rates_path", "")) if settings.get("active_rates_path") else None
+            brt_path = Path(settings.get("brt_passive_path", "")) if settings.get("brt_passive_path") else None
+            order = clean_text(body.get("order"))
+            if not order:
+                raise ValueError("Indica l'ordine da togliere.")
+            if len(shipments) != 1:
+                raise ValueError("Seleziona una sola spedizione per togliere un ordine.")
+            remove_order_from_shipment(
+                shipments[0],
+                order,
+                active_path,
+                brt_path,
+                remaining_goods_weight=body.get("remainingWeight"),
+                remaining_pallets=body.get("remainingPallets"),
+                remaining_volume=body.get("remainingVolume"),
+            )
         elif action in {"unload_date", "unload_booking"}:
             clear_unload = bool(body.get("clear"))
             unload_date = body.get("unloadDate")
