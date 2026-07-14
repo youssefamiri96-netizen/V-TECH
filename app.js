@@ -134,6 +134,12 @@ const els = {
   manualPalletsBtn: document.querySelector("#manualPalletsBtn"),
   manualPalletsDialog: document.querySelector("#manualPalletsDialog"),
   manualPalletsInput: document.querySelector("#manualPalletsInput"),
+  removeOrderBtn: document.querySelector("#removeOrderBtn"),
+  removeOrderDialog: document.querySelector("#removeOrderDialog"),
+  removeOrderSelect: document.querySelector("#removeOrderSelect"),
+  removeOrderPallets: document.querySelector("#removeOrderPallets"),
+  removeOrderWeight: document.querySelector("#removeOrderWeight"),
+  removeOrderVolume: document.querySelector("#removeOrderVolume"),
   unloadDateBtn: document.querySelector("#unloadDateBtn"),
   unloadDateDialog: document.querySelector("#unloadDateDialog"),
   unloadDateInput: document.querySelector("#unloadDateInput"),
@@ -3457,6 +3463,52 @@ document.querySelector("#clearManualPalletsBtn").addEventListener("click", async
   try {
     await performAction("manual_pallets", { clear: true });
     showToast("Bancali manuali rimossi. Calcolo tornato al valore del report.");
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+els.removeOrderBtn.addEventListener("click", () => {
+  if (!state.selected.size) {
+    showToast("Seleziona una spedizione.");
+    return;
+  }
+  const shipments = selectedShipments();
+  if (shipments.length !== 1) {
+    showToast("Seleziona una sola spedizione per togliere un ordine.");
+    return;
+  }
+  const row = allRows().find(item => item.shipment === shipments[0]);
+  const ordersText = String((row && (row.display["Orders"] || row.raw["Orders"])) || "").trim();
+  const orders = ordersText.split(/[|,;/]+/).map(part => part.trim()).filter(Boolean);
+  if (orders.length < 2) {
+    showToast("Questa spedizione ha un solo ordine: usa Elimina.");
+    return;
+  }
+  els.removeOrderSelect.innerHTML = orders
+    .map(order => `<option value="${escapeHtml(order)}">${escapeHtml(order)}</option>`)
+    .join("");
+  els.removeOrderPallets.value = "";
+  els.removeOrderWeight.value = "";
+  els.removeOrderVolume.value = "";
+  els.removeOrderDialog.showModal();
+  window.setTimeout(() => els.removeOrderSelect.focus(), 0);
+});
+
+document.querySelector("#applyRemoveOrderBtn").addEventListener("click", async (event) => {
+  event.preventDefault();
+  const order = els.removeOrderSelect.value;
+  const remainingPallets = els.removeOrderPallets.value.trim();
+  const remainingWeight = els.removeOrderWeight.value.trim();
+  const remainingVolume = els.removeOrderVolume.value.trim();
+  if (!order) {
+    showToast("Scegli l'ordine da togliere.");
+    return;
+  }
+  els.removeOrderDialog.close();
+  try {
+    await performAction("remove_order", { order, remainingPallets, remainingWeight, remainingVolume });
+    showToast("Ordine rimosso. Peso, bancali e margini aggiornati.");
   } catch (error) {
     showToast(error.message);
   }
