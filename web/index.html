@@ -106,6 +106,7 @@
               <button id="requiredDeliveryBtn">Data tassativa</button>
               <button id="manualPassiveBtn">Passiva manuale</button>
               <button id="manualPalletsBtn">Bancali manuali</button>
+              <button id="removeOrderBtn">Rimuovi ordine</button>
               <button id="unloadDateBtn">Booking scarico</button>
               <button id="activeUrgentBtn">Urgente attiva</button>
               <button class="warning" data-action="planned">Pianificato</button>
@@ -294,6 +295,33 @@
     </form>
   </dialog>
 
+  <dialog id="removeOrderDialog">
+    <form method="dialog" class="modal">
+      <h2>Rimuovi ordine dallo shipment</h2>
+      <p>Togli uno degli ordini raggruppati in questa spedizione. Indica il carico che resta: attivo, passivo e margine vengono ricalcolati. L'ordine rimosso resta escluso ai prossimi import se ripresentato da solo.</p>
+      <label class="modal-field">
+        <span>Ordine da togliere</span>
+        <select id="removeOrderSelect"></select>
+      </label>
+      <label class="modal-field">
+        <span>Bancali che restano</span>
+        <input id="removeOrderPallets" inputmode="decimal" placeholder="es. 5" />
+      </label>
+      <label class="modal-field">
+        <span>Peso merce che resta (kg)</span>
+        <input id="removeOrderWeight" inputmode="decimal" placeholder="es. 600" />
+      </label>
+      <label class="modal-field">
+        <span>Volume merce che resta (m3) &mdash; opzionale</span>
+        <input id="removeOrderVolume" inputmode="decimal" placeholder="es. 2.4" />
+      </label>
+      <menu>
+        <button value="cancel">Annulla</button>
+        <button class="primary" value="apply" id="applyRemoveOrderBtn">Rimuovi ordine</button>
+      </menu>
+    </form>
+  </dialog>
+
   <dialog id="unloadDateDialog">
     <form method="dialog" class="modal">
       <h2>Booking scarico</h2>
@@ -346,6 +374,6 @@
   </dialog>
 
   <div class="toast" id="toast" role="status"></div>
-  <script src="/app.js?v=manual-dates-20260604"></script>
+  <script src="/app.js?v=remove-order-20260714"></script>
 </body>
 </html>
