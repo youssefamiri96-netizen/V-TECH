@@ -2540,7 +2540,7 @@ def remove_order_from_shipment(
         raise ValueError(f"Spedizione non trovata: {shipment}")
 
     orders_text = clean_text(row.get("Orders"))
-    orders = [token.strip() for token in re.split(r"[,;/]+", orders_text) if token.strip()]
+    orders = [token.strip() for token in re.split(r"[|,;/]+", orders_text) if token.strip()]
     target_key = normalized_order_key(order_to_remove)
     if not target_key:
         raise ValueError("Indica l'ordine da togliere.")
@@ -2553,7 +2553,7 @@ def remove_order_from_shipment(
         raise ValueError("Non puoi togliere l'unico ordine dello shipment: usa Elimina spedizione.")
 
     # 1) Ordini che restano
-    row["Orders"] = ", ".join(remaining_orders)
+    row["Orders"] = " | ".join(remaining_orders)
 
     # 2) Peso merce / volume / pallet del carico che resta
     if clean_text(remaining_goods_weight) != "":
