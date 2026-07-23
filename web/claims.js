@@ -26,6 +26,8 @@
     claims: [],
     statuses: [],
     reasons: [],
+    reasonGroups: null,
+    origins: [],
     kinds: [],
     search: "",
     statusFilter: "",
@@ -80,6 +82,31 @@
     if (!url) return;
     if (typeof triggerDownload === "function") triggerDownload(url);
     else window.open(url, "_blank");
+  }
+
+  function claimsOnly() {
+    return !!(state.data && state.data.auth && state.data.auth.claimsOnly);
+  }
+
+  function reasonOptions(selected) {
+    var groups = claimState.reasonGroups;
+    var current = text(selected);
+    var mark = function (value) {
+      return '<option value="' + esc(value) + '"' + (current === value ? " selected" : "") + ">" + esc(value) + "</option>";
+    };
+    if (groups && typeof groups === "object" && Object.keys(groups).length) {
+      var known = [];
+      var html = Object.keys(groups).map(function (label) {
+        var list = groups[label] || [];
+        known = known.concat(list);
+        return '<optgroup label="' + esc(label) + '">' + list.map(mark).join("") + "</optgroup>";
+      }).join("");
+      if (current && known.indexOf(current) === -1) html = mark(current) + html;
+      return html;
+    }
+    var flat = claimState.reasons.length ? claimState.reasons : [current];
+    if (current && flat.indexOf(current) === -1) flat = [current].concat(flat);
+    return flat.map(mark).join("");
   }
 
   /* ----------------------------------------------------------------- css */
@@ -157,6 +184,7 @@
     else nav.appendChild(button);
     button.addEventListener("click", function () {
       if (state.data && state.data.auth && state.data.auth.billingOnly) return;
+      if (state.data && state.data.auth && state.data.auth.canClaims === false) return;
       state.page = PAGE;
       if (state.selected && state.selected.clear) state.selected.clear();
       if (typeof clearDetail === "function") clearDetail();
@@ -165,8 +193,37 @@
   }
 
   /* -------------------------------------------------------------- render */
+  function applyClaimsOnlyMode() {
+    if (!claimsOnly()) return;
+    // L'utente magazzino vede solo i Claim: nascondo il resto della navigazione.
+    document.querySelectorAll(".nav-item").forEach(function (button) {
+      button.hidden = button.dataset.page !== PAGE;
+    });
+    if (els.deletedBox) els.deletedBox.hidden = true;
+    ["importBtn", "refreshTopBtn", "reportUploadBtn", "activeUploadBtn", "brtUploadBtn"].forEach(function (id) {
+      var element = document.querySelector("#" + id);
+      if (element) element.hidden = true;
+    });
+    if (els.currentUser && state.data && state.data.auth && state.data.auth.user) {
+      var who = state.data.auth.user;
+      els.currentUser.textContent = (who.displayName || who.username || "Utente") + " - Claim / magazzino";
+    }
+    if (state.page !== PAGE) state.page = PAGE;
+  }
+
   var baseRender = window.render;
   window.render = function () {
+    if (claimsOnly()) {
+      state.page = PAGE;
+      try {
+        renderClaimsPage();
+        applyClaimsOnlyMode();
+      } catch (error) {
+        console.error("[claim]", error);
+        if (els.content) els.content.innerHTML = '<div class="claim-empty">Errore nella sezione claim: ' + esc(error.message) + "</div>";
+      }
+      return;
+    }
     if (state.page === PAGE) {
       try {
         renderClaimsPage();
@@ -197,6 +254,8 @@
     document.querySelectorAll(".nav-item").forEach(function (button) {
       button.classList.toggle("active", button.dataset.page === state.page);
     });
+    var navClaim = document.querySelector('.nav-item[data-page="' + PAGE + '"]');
+    if (navClaim && state.data && state.data.auth && state.data.auth.canClaims === false) navClaim.hidden = true;
     if (els.deletedBox) els.deletedBox.classList.remove("active");
   }
 
@@ -311,6 +370,7 @@
         '  <div class="claim-card-sub">',
         "    <span>" + esc(claim.customer || "-") + "</span>",
         "    <span>" + esc(claim.reason || "") + "</span>",
+        (claim.origin ? '<span class="claim-chip">' + esc(claim.origin) + "</span>" : ""),
         (claim.province ? "<span>" + esc(claim.province) + "</span>" : ""),
         (attachments ? "<span>" + attachments + " allegati</span>" : ""),
         (claim.amount_claimed ? "<span>" + esc(money(claim.amount_claimed)) + "</span>" : ""),
@@ -343,14 +403,12 @@
     box.innerHTML = [
       '<div class="claim-detail">',
       "  <h3>" + esc(claim.claim_ref) + " - " + esc(claim.shipment) + "</h3>",
-      '  <div class="claim-detail-sub">' + esc(claim.customer || "-") +
+      '  <div class="claim-detail-sub">' + (claim.origin ? "[" + esc(claim.origin) + "] " : "") + esc(claim.customer || "-") +
         (claim.orders_text ? " - ordini " + esc(claim.orders_text) : "") +
         (claim.carrier ? " - " + esc(claim.carrier) : "") +
         (claim.province ? " (" + esc(claim.province) + ")" : "") + "</div>",
       '  <div class="claim-grid">',
-      "    <label>Motivo<select data-claim-field=\"reason\">" + reasons.map(function (reason) {
-        return '<option value="' + esc(reason) + '"' + (text(claim.reason) === reason ? " selected" : "") + ">" + esc(reason) + "</option>";
-      }).join("") + "</select></label>",
+      "    <label>Motivo<select data-claim-field=\"reason\">" + reasonOptions(claim.reason) + "</select></label>",
       "    <label>Stato<select data-claim-field=\"status\">" + statuses.map(function (status) {
         return '<option value="' + esc(status) + '"' + (text(claim.status) === status ? " selected" : "") + ">" + esc(status) + "</option>";
       }).join("") + "</select></label>",
@@ -406,6 +464,8 @@
       claimState.claims = payload.claims || [];
       claimState.statuses = payload.statuses || [];
       claimState.reasons = payload.reasons || [];
+      claimState.reasonGroups = payload.reasonGroups || null;
+      claimState.origins = payload.origins || [];
       claimState.kinds = payload.attachmentKinds || [];
       claimState.loaded = true;
       if (options && options.select) claimState.selectedId = options.select;
@@ -524,8 +584,7 @@
     claimState.pickerQuery = "";
     var reason = dialog.querySelector("#claimNewReason");
     var status = dialog.querySelector("#claimNewStatus");
-    reason.innerHTML = (claimState.reasons.length ? claimState.reasons : ["Merce danneggiata", "Merce mancante", "Consegna in ritardo", "Altro"])
-      .map(function (item) { return '<option value="' + esc(item) + '">' + esc(item) + "</option>"; }).join("");
+    reason.innerHTML = reasonOptions("");
     status.innerHTML = (claimState.statuses.length ? claimState.statuses : ["Aperto"])
       .map(function (item) { return '<option value="' + esc(item) + '">' + esc(item) + "</option>"; }).join("");
     dialog.querySelector("#claimPickerInput").value = "";
