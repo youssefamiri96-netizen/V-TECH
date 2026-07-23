@@ -11,6 +11,7 @@ const state = {
   page: "dashboard",
   selected: new Set(),
   search: "",
+  registrySearch: "",
   autoScanRunning: false,
   autoScanWarningShown: false,
   copyShipment: "",
@@ -18,8 +19,12 @@ const state = {
   copySelectedText: "",
   billingMonth: "",
   columnOrder: [],
+  columnWidths: {},
   dragColumnKey: "",
+  columnResize: null,
   detailShipment: "",
+  plannedDate: todayIso(),
+  plannedDateManual: false,
   departedDate: todayIso(),
   departedSearch: "",
   ftlFollowupDateFilterActive: false,
@@ -31,6 +36,8 @@ const state = {
 };
 
 const COLUMN_ORDER_STORAGE_KEY = "vtech.columnOrder.v1";
+const COLUMN_WIDTHS_STORAGE_KEY = "vtech.columnWidths.v1";
+const SIDEBAR_COLLAPSED_STORAGE_KEY = "vtech.sidebarCollapsed.v1";
 const ACTION_DOCK_STORAGE_KEY = "vtech.actionDockPosition.v1";
 const PRIMARY_GROUP_KEYS = [
   "verify",
@@ -112,6 +119,7 @@ const metricConfig = [
 ];
 
 const els = {
+  sidebarToggle: document.querySelector("#sidebarToggle"),
   content: document.querySelector("#content"),
   metrics: document.querySelector("#metrics"),
   pageTitle: document.querySelector("#pageTitle"),
@@ -119,6 +127,7 @@ const els = {
   selectionInfo: document.querySelector("#selectionInfo"),
   actionMenuCount: document.querySelector("#actionMenuCount"),
   searchInput: document.querySelector("#searchInput"),
+  searchLabel: document.querySelector("#shipmentToolbar .search span"),
   refreshTopBtn: document.querySelector("#refreshTopBtn"),
   toast: document.querySelector("#toast"),
   carrierDialog: document.querySelector("#carrierDialog"),
@@ -126,6 +135,14 @@ const els = {
   serviceLevelBtn: document.querySelector("#serviceLevelBtn"),
   serviceLevelDialog: document.querySelector("#serviceLevelDialog"),
   serviceLevelSelect: document.querySelector("#serviceLevelSelect"),
+  freightCodeBtn: document.querySelector("#freightCodeBtn"),
+  freightCodeDialog: document.querySelector("#freightCodeDialog"),
+  freightCodeSelect: document.querySelector("#freightCodeSelect"),
+  freightRequiredDeliveryField: document.querySelector("#freightRequiredDeliveryField"),
+  freightRequiredDeliveryInput: document.querySelector("#freightRequiredDeliveryInput"),
+  requiredDeliveryBtn: document.querySelector("#requiredDeliveryBtn"),
+  requiredDeliveryDialog: document.querySelector("#requiredDeliveryDialog"),
+  requiredDeliveryInput: document.querySelector("#requiredDeliveryInput"),
   activeUrgentBtn: document.querySelector("#activeUrgentBtn"),
   activeUrgentDialog: document.querySelector("#activeUrgentDialog"),
   manualPassiveBtn: document.querySelector("#manualPassiveBtn"),
@@ -134,15 +151,15 @@ const els = {
   manualPalletsBtn: document.querySelector("#manualPalletsBtn"),
   manualPalletsDialog: document.querySelector("#manualPalletsDialog"),
   manualPalletsInput: document.querySelector("#manualPalletsInput"),
-  removeOrderBtn: document.querySelector("#removeOrderBtn"),
-  removeOrderDialog: document.querySelector("#removeOrderDialog"),
-  removeOrderSelect: document.querySelector("#removeOrderSelect"),
-  removeOrderPallets: document.querySelector("#removeOrderPallets"),
-  removeOrderWeight: document.querySelector("#removeOrderWeight"),
-  removeOrderVolume: document.querySelector("#removeOrderVolume"),
+  plannedDateBtn: document.querySelector("#plannedDateBtn"),
   unloadDateBtn: document.querySelector("#unloadDateBtn"),
   unloadDateDialog: document.querySelector("#unloadDateDialog"),
   unloadDateInput: document.querySelector("#unloadDateInput"),
+  unloadTimeInput: document.querySelector("#unloadTimeInput"),
+  unloadBookingRefInput: document.querySelector("#unloadBookingRefInput"),
+  deliveredDateBtn: document.querySelector("#deliveredDateBtn"),
+  deliveredDateDialog: document.querySelector("#deliveredDateDialog"),
+  deliveredDateInput: document.querySelector("#deliveredDateInput"),
   mailPanel: document.querySelector("#mailPanel"),
   mailDate: document.querySelector("#mailDate"),
   mailBtn: document.querySelector("#mailBtn"),
@@ -165,6 +182,14 @@ const els = {
   todayDepartedFilter: document.querySelector("#todayDepartedFilter"),
   clearDepartedFilters: document.querySelector("#clearDepartedFilters"),
   departedSelectionInfo: document.querySelector("#departedSelectionInfo"),
+  plannedFilters: document.querySelector("#plannedFilters"),
+  plannedDateFilter: document.querySelector("#plannedDateFilter"),
+  plannedDateDialog: document.querySelector("#plannedDateDialog"),
+  plannedDateInput: document.querySelector("#plannedDateInput"),
+  applyPlannedDateBtn: document.querySelector("#applyPlannedDateBtn"),
+  todayPlannedFilter: document.querySelector("#todayPlannedFilter"),
+  clearPlannedFilter: document.querySelector("#clearPlannedFilter"),
+  plannedFilterInfo: document.querySelector("#plannedFilterInfo"),
   vtechPath: document.querySelector("#vtechPath"),
   activePath: document.querySelector("#activePath"),
   brtPath: document.querySelector("#brtPath"),
@@ -258,6 +283,9 @@ function applyData(data, { renderPage = true, keepSelection = true } = {}) {
   els.activePath.value = state.data.paths.active || "";
   els.brtPath.value = state.data.paths.brt || "";
   state.columnOrder = normalizeColumnOrder(state.columnOrder.length ? state.columnOrder : readColumnOrder());
+  if (!Object.keys(state.columnWidths).length) {
+    state.columnWidths = readColumnWidths();
+  }
   state.selected = keepSelection ? new Set(existingShipments(selectedShipments())) : new Set();
   if (renderPage) render();
 }
@@ -283,10 +311,21 @@ function render() {
   els.mailPanel.hidden = !isGroupage;
   els.ftlMailPanel.hidden = !isFtl;
   els.ftlReminderPanel.hidden = !isFtl;
+  els.plannedFilters.hidden = !(isPlanning || isGroupage);
+  els.plannedDateFilter.value = state.plannedDate;
   els.departedFilters.hidden = !(isGroupage || isFtl);
   els.departedDateFilter.value = isFtl && !state.ftlFollowupDateFilterActive ? "" : state.departedDate;
   els.departedSearchInput.value = state.departedSearch;
   els.shipmentToolbar.hidden = isBilling || isDashboard || isAdmin;
+  if (els.searchInput) {
+    els.searchInput.value = isRegistry ? state.registrySearch : state.search;
+    els.searchInput.placeholder = isRegistry
+      ? "Cliente, codice, ship-to, indirizzo, mail, telefono..."
+      : "Shipment, ordine, cliente, provincia, indirizzo...";
+  }
+  if (els.searchLabel) {
+    els.searchLabel.textContent = isRegistry ? "Cerca cliente" : "Cerca";
+  }
   els.selectionInfo.hidden = isRegistry || isAdmin;
   els.operationBar.hidden = isBilling || isRegistry || isAdmin || isDashboard;
   els.confirmedBtn.hidden = !isFtl;
@@ -296,10 +335,14 @@ function render() {
   els.purgeDeletedBtn.hidden = !isDeleted;
   document.querySelector("#carrierBtn").hidden = isDeleted || isRegistry;
   els.serviceLevelBtn.hidden = isDeleted || isRegistry;
+  els.freightCodeBtn.hidden = isDeleted || isRegistry;
+  els.requiredDeliveryBtn.hidden = isDeleted || isRegistry;
   els.activeUrgentBtn.hidden = isDeleted || isRegistry;
   els.manualPassiveBtn.hidden = isDeleted || isRegistry;
-  els.manualPalletsBtn.hidden = !isGroupage;
+  els.manualPalletsBtn.hidden = isDeleted || isRegistry;
+  els.plannedDateBtn.hidden = !isGroupage;
   els.unloadDateBtn.hidden = !isFtl;
+  els.deliveredDateBtn.hidden = !isFtl;
   document.querySelector('[data-action="planned"]').hidden = isDeleted || isRegistry;
   document.querySelector('[data-action="unplanned"]').hidden = isDeleted || isRegistry;
   document.querySelector('[data-action="delete"]').hidden = isDeleted || isRegistry;
@@ -470,27 +513,16 @@ const PROVINCE_GEO_POINTS = {
   VT: [12.11, 42.42], VV: [16.10, 38.68],
 };
 
-const GEO_LABEL_OFFSETS = {
-  BG: [8, -8, "start"],
-  MB: [10, -17, "start"],
-  MI: [10, -5, "start"],
-  PV: [10, 8, "start"],
-  PC: [10, 16, "start"],
-  AL: [10, 10, "start"],
-  NO: [-10, -10, "end"],
-  VA: [-10, -16, "end"],
-  CO: [10, -13, "start"],
-  RM: [10, 5, "start"],
-  TE: [10, -6, "start"],
-  CT: [10, 7, "start"],
-  CA: [10, 6, "start"],
-  SS: [10, 6, "start"],
-};
+const ITALY_MAP_SIZE = { width: 740, height: 740 };
+const ITALY_MAP_BOUNDS = { west: 6.35, east: 18.75, north: 47.20, south: 36.65 };
+const ITALY_MAP_PADDING = { left: 80, right: 65, top: 40, bottom: 45 };
 
 function projectItalyPoint(lon, lat) {
+  const drawableWidth = ITALY_MAP_SIZE.width - ITALY_MAP_PADDING.left - ITALY_MAP_PADDING.right;
+  const drawableHeight = ITALY_MAP_SIZE.height - ITALY_MAP_PADDING.top - ITALY_MAP_PADDING.bottom;
   return {
-    x: 22 + ((lon - 6.45) / (18.75 - 6.45)) * 314,
-    y: 18 + ((47.10 - lat) / (47.10 - 36.65)) * 424,
+    x: ITALY_MAP_PADDING.left + ((lon - ITALY_MAP_BOUNDS.west) / (ITALY_MAP_BOUNDS.east - ITALY_MAP_BOUNDS.west)) * drawableWidth,
+    y: ITALY_MAP_PADDING.top + ((ITALY_MAP_BOUNDS.north - lat) / (ITALY_MAP_BOUNDS.north - ITALY_MAP_BOUNDS.south)) * drawableHeight,
   };
 }
 
@@ -575,27 +607,23 @@ function renderDashboardGeoView(monthRows) {
       </div>
       <div class="geo-body">
         <div class="italy-map-wrap">
-          <svg class="italy-map" viewBox="0 0 360 480" role="img" aria-label="Mappa spedizioni per provincia">
+          <svg class="italy-map" viewBox="0 0 ${ITALY_MAP_SIZE.width} ${ITALY_MAP_SIZE.height}" role="img" aria-label="Mappa spedizioni per provincia">
             <defs>
               <radialGradient id="geoHalo" cx="50%" cy="50%" r="50%">
-                <stop offset="0%" stop-color="#22d3ee" stop-opacity=".22" />
+                <stop offset="0%" stop-color="#22d3ee" stop-opacity=".28" />
                 <stop offset="100%" stop-color="#22d3ee" stop-opacity="0" />
               </radialGradient>
             </defs>
-            <image class="italy-map-image" href="/italy-map-outline.svg" x="0" y="0" width="360" height="480" preserveAspectRatio="xMidYMid meet" />
+            <image class="italy-map-image" href="/italy-map-base.avif?v=italy-avif-map-20260522" x="0" y="0" width="${ITALY_MAP_SIZE.width}" height="${ITALY_MAP_SIZE.height}" preserveAspectRatio="xMidYMid meet" />
             ${mapped.map(item => {
-              const radius = 2.8 + (item.count / maxCount) * 3.8;
-              const haloRadius = 7 + (item.pallets / Math.max(1, maxPallets)) * 13;
-              const labelOffset = GEO_LABEL_OFFSETS[item.province];
-              const labelDx = labelOffset?.[0] ?? (item.point.x > 304 ? -18 : 9);
-              const labelDy = labelOffset?.[1] ?? 5;
-              const labelAnchor = labelOffset?.[2] ?? (item.point.x > 304 ? "end" : "start");
+              const percent = totalShipments ? item.count / totalShipments * 100 : 0;
+              const radius = 3.5 + Math.sqrt(item.count / maxCount) * 5;
+              const haloRadius = radius + 4 + Math.sqrt(item.pallets / Math.max(1, maxPallets)) * 5;
               return `
                 <g class="geo-point" style="--geo-accent:${item.count === maxCount ? "#0f766e" : "#0ea5e9"}">
                   <circle class="geo-point-pulse" cx="${item.point.x.toFixed(2)}" cy="${item.point.y.toFixed(2)}" r="${haloRadius.toFixed(2)}" />
                   <circle class="geo-point-dot" cx="${item.point.x.toFixed(2)}" cy="${item.point.y.toFixed(2)}" r="${radius.toFixed(2)}" />
-                  <text text-anchor="${labelAnchor}" x="${(item.point.x + labelDx).toFixed(2)}" y="${(item.point.y + labelDy).toFixed(2)}">${escapeHtml(item.province)}</text>
-                  <title>${escapeHtml(`${item.province}${item.cityLabel ? ` - ${item.cityLabel}` : ""}: ${item.count} spedizioni, ${compactNumberText(item.pallets)} bancali`)}</title>
+                  <title>${escapeHtml(`${item.province}${item.cityLabel ? ` - ${item.cityLabel}` : ""}: ${item.count} spedizioni, ${compactNumberText(item.pallets)} bancali, ${percentText(percent)} del mese`)}</title>
                 </g>
               `;
             }).join("")}
@@ -610,7 +638,7 @@ function renderDashboardGeoView(monthRows) {
             <div class="geo-rank-row">
               <div>
                 <strong>${escapeHtml(item.province)}</strong>
-                <span>${item.count} spedizion${item.count === 1 ? "e" : "i"} - ${escapeHtml(compactNumberText(item.pallets))} bancali${item.cityLabel ? ` - ${escapeHtml(item.cityLabel)}` : ""}</span>
+                <span>${item.count} spedizion${item.count === 1 ? "e" : "i"} - ${escapeHtml(percentText(totalShipments ? item.count / totalShipments * 100 : 0))} - ${escapeHtml(compactNumberText(item.pallets))} bancali${item.cityLabel ? ` - ${escapeHtml(item.cityLabel)}` : ""}</span>
               </div>
               <div class="geo-rank-track"><i style="width:${Math.max(6, item.pallets / maxPallets * 100)}%"></i></div>
               <em>${escapeHtml(moneyText(item.active))}</em>
@@ -773,9 +801,41 @@ function renderDashboard() {
 }
 
 function unloadDateKey(row) {
-  const parsed = parseDateValue(row.raw["Data Scarico Prenotato"] || row.display["Data Scarico Prenotato"]);
+  const parsed = parseDateValue(row?.raw?.["Data Scarico Prenotato"] || row?.display?.["Data Scarico Prenotato"]);
   if (!parsed) return "";
   return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
+}
+
+function dateInputValue(value) {
+  const parsed = parseDateValue(value);
+  if (!parsed) return "";
+  return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
+}
+
+function requiredDeliveryDateKey(row) {
+  return dateInputValue(row?.raw?.["Data Consegna Tassativa"] || row?.display?.["Data Consegna Tassativa"]);
+}
+
+function deliveredDateKey(row) {
+  return dateInputValue(row?.raw?.["Data Consegna"] || row?.display?.["Data Consegna"]);
+}
+
+function freightCodeValue(row) {
+  return String(row?.raw?.["Freight Code"] || row?.display?.["Freight Code"] || "").toUpperCase();
+}
+
+function isDkvRow(row) {
+  return freightCodeValue(row).split(/[^A-Z0-9]+/).includes("DKV");
+}
+
+function deliveryTargetLabel(row) {
+  return isDkvRow(row) ? "Data tassativa" : "Early delivery";
+}
+
+function deliveryTargetValue(row, fallback = "-") {
+  return isDkvRow(row)
+    ? rowValue(row, "Data Consegna Tassativa", fallback)
+    : rowValue(row, "Early Delivery Date", fallback);
 }
 
 function confirmedUnloadReminders() {
@@ -999,6 +1059,7 @@ function parseDateValue(value) {
 function billingDate(row) {
   return parseDateValue(row.raw["Late Ship Date"])
     || parseDateValue(row.raw["Data Consegna"])
+    || parseDateValue(row.raw["Data Consegna Tassativa"])
     || parseDateValue(row.raw["Early Delivery Date"])
     || parseDateValue(row.raw["Integration Date"]);
 }
@@ -1536,7 +1597,7 @@ function registryRows() {
   const rows = Array.isArray(state.data?.customers) && state.data.customers.length
     ? state.data.customers
     : (Array.isArray(state.data?.gdoCustomers) ? state.data.gdoCustomers : []);
-  const search = state.search.toLowerCase();
+  const search = state.registrySearch.toLowerCase();
   return rows
     .filter(row => {
       if (!search) return true;
@@ -1711,6 +1772,53 @@ function saveColumnOrder() {
   }
 }
 
+function readColumnWidths() {
+  try {
+    const raw = window.localStorage.getItem(COLUMN_WIDTHS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch (_error) {
+    return {};
+  }
+}
+
+function saveColumnWidths() {
+  try {
+    window.localStorage.setItem(COLUMN_WIDTHS_STORAGE_KEY, JSON.stringify(state.columnWidths));
+  } catch (_error) {
+    // Le preferenze colonne sono comode, ma non devono mai bloccare il gestionale.
+  }
+}
+
+function defaultColumnWidth(key) {
+  if (key === "Route To Address") return 330;
+  if (key === "Note Text" || key.includes("Applicati") || key.includes("Tariffa")) return 280;
+  if (key === "Customer" || key === "Cliente") return 220;
+  if (key === "Wave") return 190;
+  if (key === "Orders") return 125;
+  if (key === "Shipment") return 118;
+  if (key.includes("Date") || key.includes("Data") || key.includes("Scarico")) return 136;
+  if (key.includes("Costo") || key.includes("Margine") || key.includes("Pallet") || key.includes("Peso")) return 126;
+  return 116;
+}
+
+function columnWidth(key) {
+  const saved = Number(state.columnWidths[key]);
+  const width = Number.isFinite(saved) && saved > 0 ? saved : defaultColumnWidth(key);
+  return Math.max(72, Math.min(620, Math.round(width)));
+}
+
+function setColumnWidth(key, width) {
+  const nextWidth = Math.max(72, Math.min(620, Math.round(width)));
+  state.columnWidths = { ...state.columnWidths, [key]: nextWidth };
+  document.querySelectorAll("[data-column]").forEach((element) => {
+    if (element.dataset.column === key) {
+      element.style.width = `${nextWidth}px`;
+      element.style.minWidth = `${nextWidth}px`;
+    }
+  });
+}
+
 function normalizeColumnOrder(order) {
   const currentKeys = state.data?.columns?.map(column => column.key) || [];
   const currentSet = new Set(currentKeys);
@@ -1771,12 +1879,50 @@ function moveColumn(sourceKey, targetKey) {
   return true;
 }
 
+function normalizeSearchText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function rowSearchText(row) {
+  return [
+    row.shipment,
+    row.display?.Shipment,
+    row.raw?.Shipment,
+    row.display?.Orders,
+    row.raw?.Orders,
+    ...Object.values(row.display || {}),
+    ...Object.values(row.raw || {}),
+  ].join(" ");
+}
+
+function rowSearchMatches(row, query) {
+  const tokens = normalizeSearchText(query).split(/\s+/).filter(Boolean);
+  if (!tokens.length) return true;
+  const haystack = normalizeSearchText(rowSearchText(row));
+  return tokens.every(token => haystack.includes(token));
+}
+
 function rowMatches(row, sectionKey = "") {
+  if (state.search) return rowSearchMatches(row, state.search);
+  if (["planning", "groupage"].includes(state.page) && ["plannedGroupage", "plannedCustomer"].includes(sectionKey)) {
+    if (state.plannedDate && plannedDateKey(row) !== state.plannedDate) return false;
+  }
   if (state.page === "groupage" && sectionKey === "departed") return departedRowMatches(row);
   if (state.page === "ftl" && sectionKey === "confirmedFtl") return ftlFollowupRowMatches(row);
   if (!state.search) return true;
   const haystack = Object.values(row.display).join(" ").toLowerCase();
   return haystack.includes(state.search.toLowerCase());
+}
+
+function plannedDateKey(row) {
+  const parsed = parseDateValue(row.raw["Data Pianifica"] || row.display["Data Pianifica"]);
+  if (!parsed) return todayIso();
+  return `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}-${String(parsed.getDate()).padStart(2, "0")}`;
 }
 
 function departedDateKey(row) {
@@ -1789,28 +1935,14 @@ function departedRowMatches(row) {
   if (state.departedDate && departedDateKey(row) !== state.departedDate) {
     return false;
   }
-  if (!state.departedSearch) return true;
-  const haystack = [
-    row.display["Shipment"] || row.raw["Shipment"],
-    row.display["Orders"] || row.raw["Orders"],
-    row.display["Route to Customer"] || row.raw["Route to Customer"],
-    row.display["Provincia"] || row.raw["Provincia"],
-  ].join(" ").toLowerCase();
-  return haystack.includes(state.departedSearch.toLowerCase());
+  return rowSearchMatches(row, state.departedSearch);
 }
 
 function ftlFollowupRowMatches(row) {
   if (state.ftlFollowupDateFilterActive && state.departedDate && unloadDateKey(row) !== state.departedDate) {
     return false;
   }
-  if (!state.departedSearch) return true;
-  const haystack = [
-    row.display["Shipment"] || row.raw["Shipment"],
-    row.display["Orders"] || row.raw["Orders"],
-    row.display["Route to Customer"] || row.raw["Route to Customer"],
-    row.display["Provincia"] || row.raw["Provincia"],
-  ].join(" ").toLowerCase();
-  return haystack.includes(state.departedSearch.toLowerCase());
+  return rowSearchMatches(row, state.departedSearch);
 }
 
 function rowTone(row) {
@@ -1984,7 +2116,7 @@ function renderPlanningCard(row, sectionKey) {
             <div>
               <small>Prov.</small><em>${escapeHtml(rowValue(row, "Provincia"))}</em>
               <small>Late ship</small><em>${escapeHtml(rowValue(row, "Late Ship Date"))}</em>
-              <small>Early delivery</small><em>${escapeHtml(rowValue(row, "Early Delivery Date"))}</em>
+              <small>${escapeHtml(deliveryTargetLabel(row))}</small><em>${escapeHtml(deliveryTargetValue(row, ""))}</em>
             </div>
           </div>
           <div class="planning-block qty">
@@ -1992,8 +2124,8 @@ function renderPlanningCard(row, sectionKey) {
             <div>
               <small>Pallet</small><em>${escapeHtml(rowValue(row, "Theoretical Pallets"))}</em>
               <small>Fatt.</small><em>${escapeHtml(rowValue(row, "Pallet Fatturati"))}</em>
-              <small>Peso kg</small><em>${escapeHtml(rowValue(row, "Grand Total Shipment Ftp Wgt Kg"))}</em>
-              <small>Volume</small><em>${escapeHtml(rowValue(row, "Grand Total Shipment Ftp Vol m3"))}</em>
+              <small>Peso totale kg</small><em>${escapeHtml(rowValue(row, "Grand Total Shipment Ftp Wgt Kg"))}</em>
+              <small>Volume totale</small><em>${escapeHtml(rowValue(row, "Grand Total Shipment Ftp Vol m3"))}</em>
             </div>
           </div>
           <div class="planning-block money">
@@ -2127,11 +2259,11 @@ function renderPlanningCard(row, sectionKey) {
           ${renderPlanningFact("Wave", rowValue(row, "Wave", "N/d"))}
           ${renderPlanningFact("Partenza", rowValue(row, "Data Partenza Wave", "-"))}
           ${renderPlanningFact("Late ship", rowValue(row, "Late Ship Date", "-"))}
-          ${renderPlanningFact("Early delivery", rowValue(row, "Early Delivery Date", "-"))}
+          ${renderPlanningFact(deliveryTargetLabel(row), deliveryTargetValue(row, "-"))}
           ${renderPlanningFact("Pallet", rowValue(row, "Theoretical Pallets", "-"))}
           ${renderPlanningFact("Fatturati", rowValue(row, "Pallet Fatturati", "-"))}
-          ${renderPlanningFact("Peso kg", rowValue(row, "Grand Total Shipment Ftp Wgt Kg", "-"))}
-          ${renderPlanningFact("Volume", rowValue(row, "Grand Total Shipment Ftp Vol m3", "-"))}
+          ${renderPlanningFact("Peso totale kg", rowValue(row, "Grand Total Shipment Ftp Wgt Kg", "-"))}
+          ${renderPlanningFact("Volume totale", rowValue(row, "Grand Total Shipment Ftp Vol m3", "-"))}
           ${renderPlanningFact("Attivo", rowValue(row, "Costo Attivo", "-"), "money")}
           ${renderPlanningFact("Passivo", rowValue(row, "Costo Passivo", "-"), "money")}
           ${renderPlanningFact("Margine", rowValue(row, "Margine", "-"), marginClass)}
@@ -2173,12 +2305,20 @@ function renderSection(key, title, rows) {
 
 function renderTable(rows, sectionKey) {
   const columns = displayColumnsForCurrentPage();
-  const canReorder = state.page === "planning";
+  const canReorder = true;
+  const tableWidth = 46 + columns.reduce((total, column) => total + columnWidth(column.key), 0);
   const selectedRows = rows.filter(row => state.selected.has(row.shipment)).length;
   const allSelected = rows.length > 0 && selectedRows === rows.length;
   return `
     <div class="table-scroll">
-      <table class="data-table">
+      <table class="data-table" style="min-width:${Math.max(1360, tableWidth)}px">
+        <colgroup>
+          <col class="check-col" style="width:46px; min-width:46px" />
+          ${columns.map(column => {
+            const width = columnWidth(column.key);
+            return `<col data-column="${escapeHtml(column.key)}" style="width:${width}px; min-width:${width}px" />`;
+          }).join("")}
+        </colgroup>
         <thead>
           <tr>
             <th class="check-cell">
@@ -2195,8 +2335,12 @@ function renderTable(rows, sectionKey) {
                 class="${canReorder ? "draggable-column" : ""}"
                 data-column="${escapeHtml(column.key)}"
                 draggable="${canReorder ? "true" : "false"}"
-                title="${canReorder ? "Trascina per riordinare le colonne" : ""}"
-              >${escapeHtml(column.title)}</th>
+                style="width:${columnWidth(column.key)}px; min-width:${columnWidth(column.key)}px"
+                title="Trascina per riordinare, usa il bordo destro per allargare o stringere"
+              >
+                <span class="column-label">${escapeHtml(column.title)}</span>
+                <span class="column-resizer" data-column="${escapeHtml(column.key)}" draggable="false" aria-hidden="true"></span>
+              </th>
             `).join("")}
           </tr>
         </thead>
@@ -2248,7 +2392,10 @@ function renderRow(row, columns) {
       <td class="check-cell">
         <input class="row-check" type="checkbox" ${selected ? "checked" : ""} aria-label="Seleziona ${escapeHtml(shipment)}" />
       </td>
-      ${columns.map(column => `<td data-column="${escapeHtml(column.key)}">${escapeHtml(row.display[column.key] || "")}</td>`).join("")}
+      ${columns.map(column => {
+        const value = row.display[column.key] || "";
+        return `<td data-column="${escapeHtml(column.key)}" title="${escapeHtml(value)}">${escapeHtml(value)}</td>`;
+      }).join("")}
     </tr>
     ${detailRow}
   `;
@@ -2267,7 +2414,11 @@ function updateSelection() {
 }
 
 function selectedShipments() {
-  return [...state.selected];
+  const selected = [...state.selected];
+  if (selected.length) return selected;
+  return [...document.querySelectorAll("tr[data-shipment] .row-check:checked, .planning-card[data-shipment] .row-check:checked")]
+    .map(input => input.closest("[data-shipment]")?.dataset.shipment)
+    .filter(Boolean);
 }
 
 function allRows() {
@@ -2310,6 +2461,66 @@ function existingShipments(shipments) {
   return shipments.filter(shipment => currentShipments.has(shipment));
 }
 
+function requestPlannedDate(options = {}) {
+  return new Promise((resolve) => {
+    if (!els.plannedDateDialog || !els.plannedDateInput || !els.applyPlannedDateBtn) {
+      resolve("");
+      return;
+    }
+
+    const dialog = els.plannedDateDialog;
+    const input = els.plannedDateInput;
+    const applyButton = els.applyPlannedDateBtn;
+    const title = dialog.querySelector("h2");
+    const help = dialog.querySelector("p");
+    const cancelButtons = [...dialog.querySelectorAll('button[value="cancel"]')];
+    const originalTitle = title?.textContent || "";
+    const originalHelp = help?.textContent || "";
+    const originalApplyText = applyButton.textContent;
+    let resolved = false;
+
+    const cleanup = () => {
+      applyButton.removeEventListener("click", onApply);
+      cancelButtons.forEach(button => button.removeEventListener("click", onCancel));
+      dialog.removeEventListener("cancel", onCancel);
+      if (title) title.textContent = originalTitle;
+      if (help) help.textContent = originalHelp;
+      applyButton.textContent = originalApplyText;
+    };
+    const finish = (value) => {
+      if (resolved) return;
+      resolved = true;
+      cleanup();
+      if (dialog.open) dialog.close();
+      resolve(value);
+    };
+    function onApply(event) {
+      event.preventDefault();
+      const value = input.value;
+      if (!value) {
+        showToast("Inserisci la data di partenza pianificata.");
+        input.focus();
+        return;
+      }
+      finish(value);
+    }
+    function onCancel(event) {
+      event.preventDefault();
+      finish("");
+    }
+
+    if (title && options.title) title.textContent = options.title;
+    if (help && options.help) help.textContent = options.help;
+    if (options.applyText) applyButton.textContent = options.applyText;
+    input.value = options.initialDate || state.plannedDate || todayIso();
+    applyButton.addEventListener("click", onApply);
+    cancelButtons.forEach(button => button.addEventListener("click", onCancel));
+    dialog.addEventListener("cancel", onCancel);
+    dialog.showModal();
+    window.setTimeout(() => input.focus(), 0);
+  });
+}
+
 async function reloadAfterMutation(previousSelection, { keepSelection = false } = {}) {
   await loadData({ renderPage: false });
   const stillVisible = existingShipments(previousSelection);
@@ -2333,15 +2544,19 @@ async function performAction(action, extra = {}) {
     return;
   }
   if (action === "departed" && state.page !== "groupage") {
-    showToast("Groupage caricato si usa solo dalla pagina Groupage pianificato.");
+    showToast("Comunicata BRT si usa solo dalla pagina Groupage.");
     return;
   }
-  if (action === "manual_pallets" && state.page !== "groupage") {
-    showToast("I bancali manuali si modificano dalla pagina Groupage.");
+  if (action === "planned_date" && state.page !== "groupage") {
+    showToast("La partenza pianificata si modifica dalla pagina Groupage.");
     return;
   }
-  if (action === "unload_date" && state.page !== "ftl") {
-    showToast("La data scarico si imposta dalla pagina FTL.");
+  if (action === "manual_pallets" && !["planning", "groupage", "ftl"].includes(state.page)) {
+    showToast("I bancali manuali si modificano da Pianificazione, Groupage o FTL.");
+    return;
+  }
+  if (["unload_date", "unload_booking"].includes(action) && state.page !== "ftl") {
+    showToast("Il booking scarico si imposta dalla pagina FTL.");
     return;
   }
   if (action === "restore_deleted" && state.page !== "deleted") {
@@ -2358,11 +2573,32 @@ async function performAction(action, extra = {}) {
   if (action === "purge_deleted" && !confirm(`Cancellare per sempre ${shipments.length} spedizioni eliminate? Non potrai piu ripristinarle.`)) {
     return;
   }
+  const actionExtra = { ...extra };
+  if (action === "planned" && !actionExtra.plannedAt) {
+    const plannedAt = await requestPlannedDate();
+    if (!plannedAt) return;
+    actionExtra.plannedAt = plannedAt;
+    state.plannedDate = plannedAt;
+    state.plannedDateManual = true;
+  }
+  if (action === "planned_date" && !actionExtra.plannedAt) {
+    const row = shipments.length === 1 ? allRows().find(item => item.shipment === shipments[0]) : null;
+    const plannedAt = await requestPlannedDate({
+      title: "Modifica partenza",
+      help: "Aggiorna solo la data di partenza pianificata delle spedizioni selezionate.",
+      applyText: "Salva partenza",
+      initialDate: row ? plannedDateKey(row) : (state.plannedDate || todayIso()),
+    });
+    if (!plannedAt) return;
+    actionExtra.plannedAt = plannedAt;
+    state.plannedDate = plannedAt;
+    state.plannedDateManual = true;
+  }
   const payload = await api("/api/action", {
     method: "POST",
-    body: JSON.stringify({ action, shipments, ...extra }),
+    body: JSON.stringify({ action, shipments, ...actionExtra }),
   });
-  await reloadAfterMutation(shipments, { keepSelection: ["carrier", "service_level", "manual_passive", "manual_pallets", "unload_date", "active_urgent"].includes(action) });
+  await reloadAfterMutation(shipments, { keepSelection: ["carrier", "service_level", "freight_code", "required_delivery_date", "manual_passive", "manual_pallets", "planned_date", "unload_date", "unload_booking", "active_urgent"].includes(action) });
   if (action === "delivered" && payload.xmlFiles?.length) {
     if (payload.downloadUrl) triggerDownload(payload.downloadUrl);
     showToast(`XML creato in Download: ${payload.xmlFiles.join(", ")}. Clicca qui per aprirlo.`, {
@@ -2370,7 +2606,11 @@ async function performAction(action, extra = {}) {
       downloadUrl: payload.downloadUrl || "",
     });
   } else if (action === "departed") {
-    showToast("Spedizioni spostate in Groupage caricato.");
+    showToast("Spedizioni spostate tra le comunicate a BRT.");
+  } else if (action === "planned") {
+    showToast(`Spedizioni pianificate per il ${actionExtra.plannedAt.split("-").reverse().join("/")}.`);
+  } else if (action === "planned_date") {
+    showToast(`Partenza pianificata aggiornata al ${actionExtra.plannedAt.split("-").reverse().join("/")}.`);
   } else {
     showToast("Operazione completata. Dati aggiornati.");
   }
@@ -2388,6 +2628,8 @@ function rowText(row) {
     "Costo Passivo",
     "Margine",
     "SLA Contratto",
+    "Freight Code Manuale",
+    "Data Consegna Tassativa",
     "Data Scarico Prenotato",
     "Data Ship Minima SLA",
     "Prima Consegna SLA",
@@ -2413,7 +2655,12 @@ function rowText(row) {
     "Costo Passivo": "Passiva totale",
     "Margine": "Margine",
     "SLA Contratto": "SLA",
+    "Freight Code Manuale": "Freight manuale",
+    "Data Consegna Tassativa": "Data tassativa",
     "Data Scarico Prenotato": "Scarico prenotato",
+    "Ora Scarico Prenotato": "Ora scarico",
+    "Riferimento Booking Scarico": "Rif. booking scarico",
+    "Booking Scarico": "Booking scarico",
     "Data Ship Minima SLA": "Min. ship SLA",
     "Prima Consegna SLA": "Min. consegna SLA",
     "Dettaglio SLA": "Dettaglio SLA",
@@ -2556,6 +2803,35 @@ function triggerDownload(url) {
   document.body.appendChild(link);
   link.click();
   link.remove();
+}
+
+function setSidebarCollapsed(collapsed, { save = false } = {}) {
+  document.body.classList.toggle("sidebar-collapsed", Boolean(collapsed));
+  if (els.sidebarToggle) {
+    els.sidebarToggle.textContent = collapsed ? "Mostra menu" : "Nascondi menu";
+    els.sidebarToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+  }
+  if (save) {
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? "1" : "0");
+    } catch (_error) {
+      // Preferenza locale: se non si salva, il pulsante funziona comunque.
+    }
+  }
+}
+
+function initSidebarToggle() {
+  if (!els.sidebarToggle) return;
+  let collapsed = false;
+  try {
+    collapsed = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY) === "1";
+  } catch (_error) {
+    collapsed = false;
+  }
+  setSidebarCollapsed(collapsed);
+  els.sidebarToggle.addEventListener("click", () => {
+    setSidebarCollapsed(!document.body.classList.contains("sidebar-collapsed"), { save: true });
+  });
 }
 
 async function copyMailToClipboard(html, text) {
@@ -2725,6 +3001,7 @@ function initActionDockDrag() {
   });
 }
 
+initSidebarToggle();
 initActionDockDrag();
 
 document.querySelectorAll(".nav-item").forEach((button) => {
@@ -2757,10 +3034,15 @@ if (els.logoutBtn) {
 }
 
 els.searchInput.addEventListener("input", (event) => {
-  state.search = event.target.value.trim();
-  if (state.page === "planning") {
+  const value = event.target.value.trim();
+  if (state.page === "registry") {
+    state.registrySearch = value;
+    renderRegistry();
+  } else if (state.page === "planning") {
+    state.search = value;
     renderPlanningWorkspace();
   } else {
+    state.search = value;
     renderSections();
   }
 });
@@ -2779,6 +3061,30 @@ els.departedSearchInput.addEventListener("input", (event) => {
   state.selected.clear();
   renderSections();
   updateSelection();
+  clearDetail();
+});
+
+els.plannedDateFilter.addEventListener("input", (event) => {
+  state.plannedDate = event.target.value;
+  state.plannedDateManual = Boolean(state.plannedDate);
+  state.selected.clear();
+  render();
+  clearDetail();
+});
+
+els.todayPlannedFilter.addEventListener("click", () => {
+  state.plannedDate = todayIso();
+  state.plannedDateManual = true;
+  state.selected.clear();
+  render();
+  clearDetail();
+});
+
+els.clearPlannedFilter.addEventListener("click", () => {
+  state.plannedDate = "";
+  state.plannedDateManual = false;
+  state.selected.clear();
+  render();
   clearDetail();
 });
 
@@ -2920,7 +3226,7 @@ els.content.addEventListener("click", async (event) => {
 
 els.content.addEventListener("dragstart", (event) => {
   const header = event.target.closest("th[data-column]");
-  if (!header || state.page !== "planning") return;
+  if (!header || event.target.closest(".column-resizer")) return;
   state.dragColumnKey = header.dataset.column;
   header.classList.add("dragging");
   event.dataTransfer.effectAllowed = "move";
@@ -2929,7 +3235,7 @@ els.content.addEventListener("dragstart", (event) => {
 
 els.content.addEventListener("dragover", (event) => {
   const header = event.target.closest("th[data-column]");
-  if (!header || !state.dragColumnKey || state.page !== "planning") return;
+  if (!header || !state.dragColumnKey || event.target.closest(".column-resizer")) return;
   event.preventDefault();
   event.dataTransfer.dropEffect = "move";
   document.querySelectorAll(".drop-target").forEach(item => item.classList.remove("drop-target"));
@@ -2938,13 +3244,13 @@ els.content.addEventListener("dragover", (event) => {
 
 els.content.addEventListener("drop", (event) => {
   const header = event.target.closest("th[data-column]");
-  if (!header || !state.dragColumnKey || state.page !== "planning") return;
+  if (!header || !state.dragColumnKey || event.target.closest(".column-resizer")) return;
   event.preventDefault();
   const moved = moveColumn(state.dragColumnKey, header.dataset.column);
   document.querySelectorAll(".drop-target, .dragging").forEach(item => item.classList.remove("drop-target", "dragging"));
   state.dragColumnKey = "";
   if (moved) {
-    renderSections();
+    render();
     showToast("Ordine colonne salvato.");
   }
 });
@@ -2952,6 +3258,34 @@ els.content.addEventListener("drop", (event) => {
 els.content.addEventListener("dragend", () => {
   document.querySelectorAll(".drop-target, .dragging").forEach(item => item.classList.remove("drop-target", "dragging"));
   state.dragColumnKey = "";
+});
+
+els.content.addEventListener("mousedown", (event) => {
+  const resizer = event.target.closest(".column-resizer");
+  if (!resizer) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const key = resizer.dataset.column;
+  const header = resizer.closest("th[data-column]");
+  state.columnResize = {
+    key,
+    startX: event.clientX,
+    startWidth: header?.getBoundingClientRect().width || columnWidth(key),
+  };
+  document.body.classList.add("resizing-column");
+});
+
+document.addEventListener("mousemove", (event) => {
+  if (!state.columnResize) return;
+  const nextWidth = state.columnResize.startWidth + event.clientX - state.columnResize.startX;
+  setColumnWidth(state.columnResize.key, nextWidth);
+});
+
+document.addEventListener("mouseup", () => {
+  if (!state.columnResize) return;
+  saveColumnWidths();
+  state.columnResize = null;
+  document.body.classList.remove("resizing-column");
 });
 
 els.content.addEventListener("click", (event) => {
@@ -3107,7 +3441,12 @@ function renderDetailMarkup(row, options = {}) {
   const marginClass = marginNumber < 0 ? "negative" : "positive";
   const manualPassive = row.display["Costo Passivo Manuale"] || "";
   const manualService = row.raw["Service Level Manuale"] || "";
+  const manualFreight = row.raw["Freight Code Manuale"] || "";
+  const requiredDelivery = row.display["Data Consegna Tassativa"] || row.raw["Data Consegna Tassativa"] || "";
   const manualPallets = row.display["Pallet Manuali"] || row.raw["Pallet Manuali"] || "";
+  const palletWeight = row.display["Peso Bancali Kg"] || row.raw["Peso Bancali Kg"] || "";
+  const palletVolume = row.display["Volume Bancali m3"] || row.raw["Volume Bancali m3"] || "";
+  const palletWeightDetail = row.display["Dettaglio Peso Bancali"] || row.raw["Dettaglio Peso Bancali"] || "";
   const activeUrgent = String(row.raw["Attiva Urgente"] || "").toUpperCase() === "SI";
   return `
     <div class="detail-inline ${options.inline ? "inside-card" : ""}">
@@ -3165,10 +3504,28 @@ function renderDetailMarkup(row, options = {}) {
         <p>${escapeHtml(manualService)} applicato manualmente. ${manualService === "LTL" ? "La spedizione viene gestita nel groupage BRT." : "La spedizione viene gestita come diretta FTL."}</p>
       </div>
       ` : ""}
+      ${manualFreight ? `
+      <div class="detail-box manual-passive-box">
+        <span>Freight manuale</span>
+        <p>${escapeHtml(manualFreight)} applicato manualmente.${manualFreight === "DKV" ? ` Data tassativa: ${escapeHtml(requiredDelivery || "-")}. Early delivery nascosta.` : " Data tassativa rimossa e early delivery ripristinata."}</p>
+      </div>
+      ` : ""}
+      ${requiredDelivery && !manualFreight ? `
+      <div class="detail-box manual-passive-box">
+        <span>Data tassativa scarico</span>
+        <p>${escapeHtml(requiredDelivery)}</p>
+      </div>
+      ` : ""}
       ${manualPallets ? `
       <div class="detail-box manual-passive-box">
         <span>Bancali manuali</span>
         <p>Valore forzato: ${escapeHtml(manualPallets)} pallet. Attivo, passivo e margine vengono ricalcolati con questo valore dove il tariffario lo prevede.</p>
+      </div>
+      ` : ""}
+      ${palletWeight ? `
+      <div class="detail-box manual-passive-box">
+        <span>Peso e volume bancali</span>
+        <p>${escapeHtml(palletWeight)} kg${palletVolume ? ` e ${escapeHtml(palletVolume)} m3` : ""} aggiunti a merce. ${escapeHtml(palletWeightDetail)}</p>
       </div>
       ` : ""}
       ${activeUrgent ? `
@@ -3188,8 +3545,8 @@ function renderDetailMarkup(row, options = {}) {
       </div>
       ` : ""}
       <div class="detail-box ${unloadDateKey(row) === todayIso() ? "unload-alert" : ""}">
-        <span>Scarico prenotato</span>
-        <p>${escapeHtml(text("Data Scarico Prenotato"))}</p>
+        <span>Booking scarico</span>
+        <p>${escapeHtml(row.display["Booking Scarico"] || text("Booking Scarico") || text("Data Scarico Prenotato"))}</p>
       </div>
       <div class="detail-box">
         <span>Extra BRT applicati</span>
@@ -3275,7 +3632,7 @@ async function scanDownloadsSilently() {
       } else if (payload.result?.imported) {
         showToast(`File aggiornato automaticamente: ${payload.result.file}`);
       } else if (payload.sent?.departed) {
-        showToast(`${payload.sent.departed} spedizioni spostate in Groupage caricato dopo invio mail.`);
+        showToast(`${payload.sent.departed} spedizioni spostate tra le comunicate a BRT dopo invio mail.`);
       }
     } else if (payload.result && payload.result.error && !state.autoScanWarningShown) {
       state.autoScanWarningShown = true;
@@ -3331,6 +3688,40 @@ els.serviceLevelBtn.addEventListener("click", () => {
   els.serviceLevelDialog.showModal();
 });
 
+function updateFreightRequiredDeliveryVisibility() {
+  const isDkv = els.freightCodeSelect.value === "DKV";
+  els.freightRequiredDeliveryField.hidden = !isDkv;
+  els.freightRequiredDeliveryInput.required = isDkv;
+}
+
+els.freightCodeSelect.addEventListener("change", updateFreightRequiredDeliveryVisibility);
+
+els.freightCodeBtn.addEventListener("click", () => {
+  if (!state.selected.size) {
+    showToast("Seleziona almeno una spedizione.");
+    return;
+  }
+  const shipments = selectedShipments();
+  const row = shipments.length === 1 ? allRows().find(item => item.shipment === shipments[0]) : null;
+  els.freightCodeSelect.value = isDkvRow(row) ? "DKV" : "DKL";
+  els.freightRequiredDeliveryInput.value = requiredDeliveryDateKey(row || {});
+  updateFreightRequiredDeliveryVisibility();
+  els.freightCodeDialog.showModal();
+  window.setTimeout(() => els.freightCodeSelect.focus(), 0);
+});
+
+els.requiredDeliveryBtn.addEventListener("click", () => {
+  if (!state.selected.size) {
+    showToast("Seleziona almeno una spedizione.");
+    return;
+  }
+  const shipments = selectedShipments();
+  const row = shipments.length === 1 ? allRows().find(item => item.shipment === shipments[0]) : null;
+  els.requiredDeliveryInput.value = requiredDeliveryDateKey(row || {});
+  els.requiredDeliveryDialog.showModal();
+  window.setTimeout(() => els.requiredDeliveryInput.focus(), 0);
+});
+
 els.manualPassiveBtn.addEventListener("click", () => {
   if (!state.selected.size) {
     showToast("Seleziona almeno una spedizione.");
@@ -3349,8 +3740,8 @@ els.manualPalletsBtn.addEventListener("click", () => {
     showToast("Seleziona almeno una spedizione.");
     return;
   }
-  if (state.page !== "groupage") {
-    showToast("I bancali manuali si modificano dalla pagina Groupage.");
+  if (!["planning", "groupage", "ftl"].includes(state.page)) {
+    showToast("I bancali manuali si modificano da Pianificazione, Groupage o FTL.");
     return;
   }
   const shipments = selectedShipments();
@@ -3365,20 +3756,54 @@ els.manualPalletsBtn.addEventListener("click", () => {
   window.setTimeout(() => els.manualPalletsInput.focus(), 0);
 });
 
+els.plannedDateBtn.addEventListener("click", async () => {
+  if (!selectedShipments().length) {
+    showToast("Seleziona almeno una spedizione.");
+    return;
+  }
+  if (state.page !== "groupage") {
+    showToast("La partenza pianificata si modifica dalla pagina Groupage.");
+    return;
+  }
+  try {
+    await performAction("planned_date");
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
 els.unloadDateBtn.addEventListener("click", () => {
   if (!state.selected.size) {
     showToast("Seleziona almeno una spedizione.");
     return;
   }
   if (state.page !== "ftl") {
-    showToast("La data scarico si imposta dalla pagina FTL.");
+    showToast("Il booking scarico si imposta dalla pagina FTL.");
     return;
   }
   const shipments = selectedShipments();
   const row = shipments.length === 1 ? allRows().find(item => item.shipment === shipments[0]) : null;
   els.unloadDateInput.value = unloadDateKey(row || {});
+  els.unloadTimeInput.value = String(row?.raw["Ora Scarico Prenotato"] || "").trim();
+  els.unloadBookingRefInput.value = String(row?.raw["Riferimento Booking Scarico"] || "").trim();
   els.unloadDateDialog.showModal();
   window.setTimeout(() => els.unloadDateInput.focus(), 0);
+});
+
+els.deliveredDateBtn.addEventListener("click", () => {
+  const shipments = selectedShipments();
+  if (!shipments.length) {
+    showToast("Seleziona almeno una spedizione.");
+    return;
+  }
+  if (state.page !== "ftl") {
+    showToast("Lo scarico avvenuto si imposta dalla pagina FTL.");
+    return;
+  }
+  const row = shipments.length === 1 ? allRows().find(item => item.shipment === shipments[0]) : null;
+  els.deliveredDateInput.value = deliveredDateKey(row || {}) || todayIso();
+  els.deliveredDateDialog.showModal();
+  window.setTimeout(() => els.deliveredDateInput.focus(), 0);
 });
 
 els.activeUrgentBtn.addEventListener("click", () => {
@@ -3409,6 +3834,52 @@ document.querySelector("#applyServiceLevelBtn").addEventListener("click", async 
     showToast(serviceLevel === "LTL"
       ? "Service level LTL applicato. Spedizione spostata nel groupage BRT."
       : "Service level FTL applicato. Spedizione spostata tra le dirette.");
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+document.querySelector("#applyFreightCodeBtn").addEventListener("click", async (event) => {
+  event.preventDefault();
+  const freightCode = els.freightCodeSelect.value;
+  const requiredDeliveryDate = els.freightRequiredDeliveryInput.value;
+  if (freightCode === "DKV" && !requiredDeliveryDate) {
+    showToast("Per trasformare in DKV devi inserire la data tassativa.");
+    return;
+  }
+  els.freightCodeDialog.close();
+  try {
+    await performAction("freight_code", { freightCode, requiredDeliveryDate });
+    showToast(freightCode === "DKV"
+      ? "Ordine trasformato in DKV con data tassativa. Early delivery nascosta."
+      : "Ordine trasformato in DKL. Early delivery ripristinata.");
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+document.querySelector("#applyRequiredDeliveryBtn").addEventListener("click", async (event) => {
+  event.preventDefault();
+  const requiredDeliveryDate = els.requiredDeliveryInput.value;
+  if (!requiredDeliveryDate) {
+    showToast("Scegli la data tassativa.");
+    return;
+  }
+  els.requiredDeliveryDialog.close();
+  try {
+    await performAction("required_delivery_date", { requiredDeliveryDate });
+    showToast("Data tassativa salvata.");
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+document.querySelector("#clearRequiredDeliveryBtn").addEventListener("click", async (event) => {
+  event.preventDefault();
+  els.requiredDeliveryDialog.close();
+  try {
+    await performAction("required_delivery_date", { clear: true });
+    showToast("Data tassativa rimossa.");
   } catch (error) {
     showToast(error.message);
   }
@@ -3468,63 +3939,23 @@ document.querySelector("#clearManualPalletsBtn").addEventListener("click", async
   }
 });
 
-els.removeOrderBtn.addEventListener("click", () => {
-  if (!state.selected.size) {
-    showToast("Seleziona una spedizione.");
-    return;
-  }
-  const shipments = selectedShipments();
-  if (shipments.length !== 1) {
-    showToast("Seleziona una sola spedizione per togliere un ordine.");
-    return;
-  }
-  const row = allRows().find(item => item.shipment === shipments[0]);
-  const ordersText = String((row && (row.display["Orders"] || row.raw["Orders"])) || "").trim();
-  const orders = ordersText.split(/[|,;/]+/).map(part => part.trim()).filter(Boolean);
-  if (orders.length < 2) {
-    showToast("Questa spedizione ha un solo ordine: usa Elimina.");
-    return;
-  }
-  els.removeOrderSelect.innerHTML = orders
-    .map(order => `<option value="${escapeHtml(order)}">${escapeHtml(order)}</option>`)
-    .join("");
-  els.removeOrderPallets.value = "";
-  els.removeOrderWeight.value = "";
-  els.removeOrderVolume.value = "";
-  els.removeOrderDialog.showModal();
-  window.setTimeout(() => els.removeOrderSelect.focus(), 0);
-});
-
-document.querySelector("#applyRemoveOrderBtn").addEventListener("click", async (event) => {
-  event.preventDefault();
-  const order = els.removeOrderSelect.value;
-  const remainingPallets = els.removeOrderPallets.value.trim();
-  const remainingWeight = els.removeOrderWeight.value.trim();
-  const remainingVolume = els.removeOrderVolume.value.trim();
-  if (!order) {
-    showToast("Scegli l'ordine da togliere.");
-    return;
-  }
-  els.removeOrderDialog.close();
-  try {
-    await performAction("remove_order", { order, remainingPallets, remainingWeight, remainingVolume });
-    showToast("Ordine rimosso. Peso, bancali e margini aggiornati.");
-  } catch (error) {
-    showToast(error.message);
-  }
-});
-
 document.querySelector("#applyUnloadDateBtn").addEventListener("click", async (event) => {
   event.preventDefault();
   const unloadDate = els.unloadDateInput.value;
+  const unloadTime = els.unloadTimeInput.value;
+  const bookingRef = els.unloadBookingRefInput.value.trim();
   if (!unloadDate) {
     showToast("Scegli il giorno dello scarico.");
     return;
   }
+  if (!unloadTime) {
+    showToast("Scegli l'ora dello scarico.");
+    return;
+  }
   els.unloadDateDialog.close();
   try {
-    await performAction("unload_date", { unloadDate });
-    showToast("Data scarico salvata. Promemoria aggiornato.");
+    await performAction("unload_booking", { unloadDate, unloadTime, bookingRef });
+    showToast("Booking scarico salvato.");
   } catch (error) {
     showToast(error.message);
   }
@@ -3534,8 +3965,23 @@ document.querySelector("#clearUnloadDateBtn").addEventListener("click", async (e
   event.preventDefault();
   els.unloadDateDialog.close();
   try {
-    await performAction("unload_date", { clear: true });
-    showToast("Data scarico rimossa.");
+    await performAction("unload_booking", { clear: true });
+    showToast("Booking scarico rimosso.");
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+document.querySelector("#applyDeliveredDateBtn").addEventListener("click", async (event) => {
+  event.preventDefault();
+  const deliveredAt = els.deliveredDateInput.value;
+  if (!deliveredAt) {
+    showToast("Scegli il giorno dello scarico avvenuto.");
+    return;
+  }
+  els.deliveredDateDialog.close();
+  try {
+    await performAction("delivered", { deliveredAt });
   } catch (error) {
     showToast(error.message);
   }
@@ -3568,10 +4014,15 @@ loadData()
   .catch(error => showToast(error.message));
 
 els.mailBtn.addEventListener("click", async () => {
+  const shipments = selectedShipments();
+  if (!shipments.length) {
+    showToast("Seleziona una o piu spedizioni groupage pianificate.");
+    return;
+  }
   try {
     const payload = await api("/api/groupage-mail", {
       method: "POST",
-      body: JSON.stringify({ date: els.mailDate.value }),
+      body: JSON.stringify({ shipments }),
     });
     const copyMode = await copyMailToClipboard(payload.result.clipboardHtml, payload.result.clipboardText);
     const cloudFile = payload.result.downloadUrl ? ` Ho lasciato anche il file ${payload.result.mailFile || "mail"} scaricabile.` : "";
@@ -3604,4 +4055,6 @@ els.ftlMailBtn.addEventListener("click", async () => {
   }
 });
 
-els.mailDate.value = new Date().toISOString().slice(0, 10);
+if (els.mailDate) {
+  els.mailDate.value = new Date().toISOString().slice(0, 10);
+}
