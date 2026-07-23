@@ -38,15 +38,47 @@ CLAIM_STATUSES = [
 ]
 OPEN_STATUSES = {"Aperto", "Inviato al vettore", "In valutazione", "Documenti richiesti", "Accettato"}
 
-CLAIM_REASONS = [
-    "Merce danneggiata",
-    "Merce mancante",
-    "Consegna in ritardo",
-    "Mancata consegna",
-    "Errore di consegna",
-    "Imballo non conforme",
-    "Altro",
-]
+CLAIM_REASON_GROUPS: dict[str, list[str]] = {
+    "Trasporto": [
+        "Merce danneggiata",
+        "Merce mancante",
+        "Consegna in ritardo",
+        "Mancata consegna",
+        "Errore di consegna",
+        "Imballo non conforme",
+        "Altro",
+    ],
+    "Magazzino": [
+        "Errore di picking",
+        "Colli mancanti al carico",
+        "Quantita spedita errata",
+        "Prodotto errato spedito",
+        "Merce danneggiata in magazzino",
+        "Bancale rotto o non conforme",
+        "Etichetta errata o mancante",
+        "Documento di trasporto errato",
+        "Danno causato dal vettore in carico",
+        "Vettore non presentato al carico",
+        "Ritardo del vettore al carico",
+        "Merce non ritirata",
+        "Reso da cliente",
+        "Altro magazzino",
+    ],
+}
+
+CLAIM_REASONS = [reason for group in CLAIM_REASON_GROUPS.values() for reason in group]
+
+CLAIM_ORIGINS = list(CLAIM_REASON_GROUPS.keys())
+DEFAULT_ORIGIN = "Trasporto"
+
+
+def claim_origin_for_reason(reason: Any) -> str:
+    """Ricava il tipo di claim (Trasporto/Magazzino) dal motivo scelto."""
+    raw = clean_text(reason)
+    for origin, reasons in CLAIM_REASON_GROUPS.items():
+        if raw in reasons:
+            return origin
+    return DEFAULT_ORIGIN
 
 ATTACHMENT_KINDS = ["Mail", "Foto", "Documento", "Altro"]
 
@@ -68,7 +100,22 @@ REASON_EN = {
     "Errore di consegna": "Wrong delivery",
     "Imballo non conforme": "Non-compliant packaging",
     "Altro": "Other",
+    "Errore di picking": "Picking error",
+    "Colli mancanti al carico": "Missing parcels at loading",
+    "Quantita spedita errata": "Wrong quantity shipped",
+    "Prodotto errato spedito": "Wrong product shipped",
+    "Merce danneggiata in magazzino": "Goods damaged in warehouse",
+    "Bancale rotto o non conforme": "Broken or non-compliant pallet",
+    "Etichetta errata o mancante": "Wrong or missing label",
+    "Documento di trasporto errato": "Incorrect delivery note",
+    "Danno causato dal vettore in carico": "Damage caused by carrier at loading",
+    "Vettore non presentato al carico": "Carrier no-show at loading",
+    "Ritardo del vettore al carico": "Carrier late at loading",
+    "Merce non ritirata": "Goods not collected",
+    "Reso da cliente": "Customer return",
+    "Altro magazzino": "Other warehouse issue",
 }
+ORIGIN_EN = {"Trasporto": "Transport", "Magazzino": "Warehouse"}
 KIND_EN = {"Mail": "Email", "Foto": "Photo", "Documento": "Document", "Altro": "Other"}
 
 ALLOWED_ATTACHMENT_EXTENSIONS = {
@@ -162,6 +209,11 @@ def init_claims_db(db_path: Path = DB_PATH) -> None:
             )
             """
         )
+        # Migrazione: colonna origin (tipo claim) aggiunta dopo la prima versione.
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
+        if "origin" not in existing:
+            conn.execute("ALTER TABLE claims ADD COLUMN origin TEXT")
+            conn.execute("UPDATE claims SET origin = ? WHERE origin IS NULL OR origin = ''", (DEFAULT_ORIGIN,))
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS claim_attachments (
@@ -229,8 +281,8 @@ def create_claim(payload: dict[str, Any], author: str = "", db_path: Path = DB_P
                 claim_ref, shipment, orders_text, customer, province, carrier,
                 shipment_date, reason, description, status, amount_claimed,
                 amount_settled, carrier_ref, opened_at, updated_at, closed_at,
-                created_by, notes
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                created_by, notes, origin
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 claim_ref,
@@ -251,6 +303,7 @@ def create_claim(payload: dict[str, Any], author: str = "", db_path: Path = DB_P
                 stamp if status not in OPEN_STATUSES else "",
                 clean_text(author),
                 clean_text(payload.get("notes")),
+                clean_text(payload.get("origin")) or claim_origin_for_reason(reason),
             ),
         )
         claim_id = int(cursor.lastrowid)
@@ -306,6 +359,10 @@ def update_claim(
     if status_changed:
         assignments.append("closed_at = ?")
         values.append(stamp if new_status not in OPEN_STATUSES else "")
+
+    if "reason" in payload and clean_text(payload.get("reason")):
+        assignments.append("origin = ?")
+        values.append(claim_origin_for_reason(payload.get("reason")))
 
     note = clean_text(payload.get("eventNote"))
     with sqlite3.connect(db_path) as conn:
@@ -552,12 +609,12 @@ def export_claims_report(
 
     # Nella versione per il cliente le "Note interne" NON vengono esportate.
     headers = [
-        "Claim", "Shipment", "Orders", "Customer", "Province", "Carrier",
+        "Claim", "Type", "Shipment", "Orders", "Customer", "Province", "Carrier",
         "Shipment date", "Reason", "Description", "Status", "Carrier ref.",
         "Amount claimed", "Amount settled", "Opened on",
         "Last update", "Closed on", "Days", "Attachments",
     ] if english else [
-        "Claim", "Spedizione", "Ordini", "Cliente", "Provincia", "Vettore",
+        "Claim", "Tipo", "Spedizione", "Ordini", "Cliente", "Provincia", "Vettore",
         "Data spedizione", "Motivo", "Descrizione", "Stato", "Rif. vettore",
         "Importo richiesto", "Importo riconosciuto", "Aperto il",
         "Ultimo aggiornamento", "Chiuso il", "Giorni", "Allegati", "Note",
@@ -567,6 +624,7 @@ def export_claims_report(
         attachments = claim.get("attachments") or []
         values = [
             claim.get("claim_ref") or "",
+            _label(claim.get("origin") or DEFAULT_ORIGIN, ORIGIN_EN, english),
             claim.get("shipment") or "",
             claim.get("orders_text") or "",
             claim.get("customer") or "",
@@ -590,10 +648,10 @@ def export_claims_report(
         for column_index, value in enumerate(values, start=1):
             cell = sheet.cell(row=offset, column=column_index, value=value)
             cell.border = CELL_BORDER
-            cell.alignment = Alignment(vertical="top", wrap_text=column_index in {3, 9, 19})
-            if column_index in {12, 13}:
+            cell.alignment = Alignment(vertical="top", wrap_text=column_index in {4, 10, 20})
+            if column_index in {13, 14}:
                 cell.number_format = '#,##0.00 "EUR"'
-    _autosize(sheet, [14, 14, 18, 26, 10, 12, 14, 20, 42, 18, 16, 16, 18, 18, 18, 18, 8, 9, 30])
+    _autosize(sheet, [14, 12, 14, 18, 26, 10, 12, 14, 20, 42, 18, 16, 16, 18, 18, 18, 18, 8, 9, 30])
     sheet.freeze_panes = "A5"
     sheet.auto_filter.ref = f"A4:{get_column_letter(len(headers))}{max(4, 4 + len(claims))}"
 
@@ -664,6 +722,66 @@ def export_claims_report(
     return output_path
 
 
+ECONOMIC_FIELD_HINTS = (
+    "costo", "margine", "margin", "extra", "tariffa", "attivo", "passivo",
+    "prezzo", "importo", "nolo", "fuel",
+)
+ECONOMIC_FIELD_EXACT = {"gp", "gp%", "gp %"}
+
+
+def _is_economic_field(key: Any) -> bool:
+    text = clean_text(key).lower()
+    if not text:
+        return False
+    if text in ECONOMIC_FIELD_EXACT:
+        return True
+    return any(hint in text for hint in ECONOMIC_FIELD_HINTS)
+
+
+def strip_economics_for_claims(payload: dict[str, Any]) -> dict[str, Any]:
+    """Toglie i valori economici dal payload delle spedizioni.
+
+    Serve per gli utenti con ruolo 'claims' (magazzino): devono poter cercare
+    e selezionare le spedizioni per aprire un claim, ma non devono vedere
+    costi attivi/passivi ne' margini. I campi restano presenti ma vuoti, cosi'
+    l'interfaccia non si rompe.
+    """
+    if not isinstance(payload, dict):
+        return payload
+
+    for group_rows in (payload.get("groups") or {}).values():
+        if not isinstance(group_rows, list):
+            continue
+        for row in group_rows:
+            for bucket in ("display", "raw"):
+                data = row.get(bucket)
+                if isinstance(data, dict):
+                    for key in list(data.keys()):
+                        if _is_economic_field(key):
+                            data[key] = ""
+
+    stats = payload.get("stats")
+    if isinstance(stats, dict):
+        for key in list(stats.keys()):
+            if _is_economic_field(key):
+                stats[key] = ""
+
+    kpis = payload.get("kpis")
+    if isinstance(kpis, dict):
+        for key in list(kpis.keys()):
+            if _is_economic_field(key):
+                kpis[key] = 0
+
+    # ATTENZIONE: le chiavi vanno svuotate, NON rimosse: app.js legge
+    # data.paths.vtech in fase di avvio e senza la chiave si blocca.
+    if isinstance(payload.get("paths"), dict):
+        payload["paths"] = {key: "" for key in payload["paths"]}
+    if "billingColumns" in payload:
+        payload["billingColumns"] = []
+
+    return payload
+
+
 def claims_payload(db_path: Path = DB_PATH) -> dict[str, Any]:
     """Payload completo per il frontend."""
     claims = list_claims(db_path)
@@ -672,6 +790,8 @@ def claims_payload(db_path: Path = DB_PATH) -> dict[str, Any]:
         "claims": claims,
         "statuses": CLAIM_STATUSES,
         "reasons": CLAIM_REASONS,
+        "reasonGroups": CLAIM_REASON_GROUPS,
+        "origins": CLAIM_ORIGINS,
         "attachmentKinds": ATTACHMENT_KINDS,
         "openCount": open_count,
         "total": len(claims),
