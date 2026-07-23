@@ -72,7 +72,6 @@ from vtech_app import (
     set_manual_carrier,
     set_manual_freight_code,
     set_manual_pallets,
-    remove_order_from_shipment,
     set_manual_passive_cost,
     set_manual_service_level,
     set_required_delivery_date,
@@ -80,6 +79,17 @@ from vtech_app import (
     set_unload_date,
     to_float,
     update_planned_date,
+)
+from vtech_claims import (
+    add_claim_attachment,
+    attachment_file,
+    claims_payload,
+    create_claim,
+    delete_claim,
+    delete_claim_attachment,
+    export_claims_report,
+    init_claims_db,
+    update_claim,
 )
 
 APP_DIR = Path(__file__).resolve().parent
@@ -1531,7 +1541,7 @@ class VTechWebHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(content)
 
-    def _send_download_file(self, path: Path) -> None:
+    def _send_download_file(self, path: Path, download_name: str | None = None) -> None:
         if not path.exists() or not path.is_file():
             self.send_error(404)
             return
@@ -1539,10 +1549,11 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             self.send_error(403)
             return
         content = path.read_bytes()
-        mime_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
+        mime_type = mimetypes.guess_type(str(download_name or path))[0] or "application/octet-stream"
+        display_name = (download_name or path.name).replace('"', "")
         self.send_response(200)
         self.send_header("Content-Type", mime_type)
-        self.send_header("Content-Disposition", f"attachment; filename=\"{path.name}\"")
+        self.send_header("Content-Disposition", f"attachment; filename=\"{display_name}\"")
         self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         self.send_header("Content-Length", str(len(content)))
         self.end_headers()
@@ -1575,6 +1586,22 @@ class VTechWebHandler(BaseHTTPRequestHandler):
                 self._forbidden()
                 return
             self._send_json({"ok": True, "users": list_auth_users_payload(), "roles": USER_ROLES})
+            return
+        if path == "/api/claims":
+            self._send_json({"ok": True, **claims_payload()})
+            return
+        if path == "/api/claim-attachment":
+            query = parse_qs(parsed.query)
+            raw_id = clean_text((query.get("id") or [""])[0])
+            if not raw_id.isdigit():
+                self.send_error(400)
+                return
+            try:
+                target, original_name = attachment_file(int(raw_id))
+            except ValueError:
+                self.send_error(404)
+                return
+            self._send_download_file(target, download_name=original_name)
             return
         if path == "/api/download":
             query = parse_qs(parsed.query)
@@ -1651,6 +1678,9 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/open-path":
                 self._handle_open_path(body)
                 return
+            if parsed.path == "/api/claims":
+                self._handle_claims(body, user)
+                return
             if parsed.path == "/api/users":
                 self._handle_users(body, user)
                 return
@@ -1658,6 +1688,43 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": False, "error": str(exc)}, status=400)
             return
         self.send_error(404)
+
+    def _handle_claims(self, body: dict[str, Any], user: dict[str, str]) -> None:
+        init_claims_db()
+        action = clean_text(body.get("action")).lower()
+        author = clean_text(user.get("displayName") or user.get("username"))
+        claim: dict[str, Any] | None = None
+
+        if action == "create":
+            claim = create_claim(body, author=author)
+        elif action == "update":
+            claim = update_claim(int(body.get("claimId") or 0), body, author=author)
+        elif action == "delete":
+            delete_claim(int(body.get("claimId") or 0))
+        elif action == "attach":
+            claim = add_claim_attachment(
+                int(body.get("claimId") or 0),
+                body.get("filename"),
+                body.get("contentBase64"),
+                kind=body.get("kind"),
+                author=author,
+            )
+        elif action == "detach":
+            claim = delete_claim_attachment(int(body.get("attachmentId") or 0))
+        elif action == "export":
+            output_path = export_claims_report(language=clean_text(body.get("language")) or "it")
+            self._send_json({
+                "ok": True,
+                "file": output_path.name,
+                "path": str(output_path),
+                "downloadUrl": download_url_for_path(output_path),
+                **claims_payload(),
+            })
+            return
+        else:
+            raise ValueError("Azione claim non riconosciuta.")
+
+        self._send_json({"ok": True, "claim": claim, **claims_payload()})
 
     def _handle_login(self, body: dict[str, Any]) -> None:
         username = clean_text(body.get("username"))
@@ -1931,24 +1998,6 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             pallets = body.get("pallets")
             for shipment in shipments:
                 set_manual_pallets(shipment, pallets, active_path, brt_path, clear=clear_manual)
-        elif action == "remove_order":
-            settings = load_settings()
-            active_path = Path(settings.get("active_rates_path", "")) if settings.get("active_rates_path") else None
-            brt_path = Path(settings.get("brt_passive_path", "")) if settings.get("brt_passive_path") else None
-            order = clean_text(body.get("order"))
-            if not order:
-                raise ValueError("Indica l'ordine da togliere.")
-            if len(shipments) != 1:
-                raise ValueError("Seleziona una sola spedizione per togliere un ordine.")
-            remove_order_from_shipment(
-                shipments[0],
-                order,
-                active_path,
-                brt_path,
-                remaining_goods_weight=body.get("remainingWeight"),
-                remaining_pallets=body.get("remainingPallets"),
-                remaining_volume=body.get("remainingVolume"),
-            )
         elif action in {"unload_date", "unload_booking"}:
             clear_unload = bool(body.get("clear"))
             unload_date = body.get("unloadDate")
