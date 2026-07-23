@@ -82,6 +82,10 @@ def claim_origin_for_reason(reason: Any) -> str:
 
 ATTACHMENT_KINDS = ["Mail", "Foto", "Documento", "Altro"]
 
+# L'export contiene solo il foglio principale. Mettere True per riavere
+# anche i fogli "Allegati" e "Storico stati".
+EXPORT_DETAIL_SHEETS = False
+
 # Traduzioni per l'export in inglese da mandare al cliente.
 STATUS_EN = {
     "Aperto": "Open",
@@ -655,65 +659,67 @@ def export_claims_report(
     sheet.freeze_panes = "A5"
     sheet.auto_filter.ref = f"A4:{get_column_letter(len(headers))}{max(4, 4 + len(claims))}"
 
-    attachments_sheet = workbook.create_sheet("Attachments" if english else "Allegati")
-    attachment_headers = (
-        ["Claim", "Shipment", "Type", "File name", "Size KB", "Uploaded on", "Uploaded by"]
-        if english
-        else ["Claim", "Spedizione", "Tipo", "Nome file", "Dimensione KB", "Caricato il", "Caricato da"]
-    )
-    _style_header(attachments_sheet, attachment_headers)
-    row_index = 2
-    for claim in claims:
-        for attachment in claim.get("attachments") or []:
-            values = [
-                claim.get("claim_ref") or "",
-                claim.get("shipment") or "",
-                _label(attachment.get("kind"), KIND_EN, english),
-                attachment.get("filename") or "",
-                round((to_float(attachment.get("size_bytes")) or 0) / 1024, 1),
-                attachment.get("uploaded_at") or "",
-                attachment.get("uploaded_by") or "",
-            ]
-            for column_index, value in enumerate(values, start=1):
-                cell = attachments_sheet.cell(row=row_index, column=column_index, value=value)
-                cell.border = CELL_BORDER
-            row_index += 1
-    if row_index == 2:
-        attachments_sheet.cell(
-            row=2, column=1, value="No attachments uploaded." if english else "Nessun allegato caricato."
+    if EXPORT_DETAIL_SHEETS:
+        attachments_sheet = workbook.create_sheet("Attachments" if english else "Allegati")
+        attachment_headers = (
+            ["Claim", "Shipment", "Type", "File name", "Size KB", "Uploaded on", "Uploaded by"]
+            if english
+            else ["Claim", "Spedizione", "Tipo", "Nome file", "Dimensione KB", "Caricato il", "Caricato da"]
         )
-    _autosize(attachments_sheet, [14, 14, 12, 46, 14, 20, 18])
-    attachments_sheet.freeze_panes = "A2"
+        _style_header(attachments_sheet, attachment_headers)
+        row_index = 2
+        for claim in claims:
+            for attachment in claim.get("attachments") or []:
+                values = [
+                    claim.get("claim_ref") or "",
+                    claim.get("shipment") or "",
+                    _label(attachment.get("kind"), KIND_EN, english),
+                    attachment.get("filename") or "",
+                    round((to_float(attachment.get("size_bytes")) or 0) / 1024, 1),
+                    attachment.get("uploaded_at") or "",
+                    attachment.get("uploaded_by") or "",
+                ]
+                for column_index, value in enumerate(values, start=1):
+                    cell = attachments_sheet.cell(row=row_index, column=column_index, value=value)
+                    cell.border = CELL_BORDER
+                row_index += 1
+        if row_index == 2:
+            attachments_sheet.cell(
+                row=2, column=1, value="No attachments uploaded." if english else "Nessun allegato caricato."
+            )
+        _autosize(attachments_sheet, [14, 14, 12, 46, 14, 20, 18])
+        attachments_sheet.freeze_panes = "A2"
 
-    history_sheet = workbook.create_sheet("Status history" if english else "Storico stati")
-    history_headers = (
-        ["Claim", "Shipment", "Date", "Status", "Note", "Author"]
-        if english
-        else ["Claim", "Spedizione", "Data", "Stato", "Nota", "Autore"]
-    )
-    _style_header(history_sheet, history_headers)
-    row_index = 2
-    for claim in claims:
-        for event in sorted(claim.get("events") or [], key=lambda item: int(item.get("id") or 0)):
-            values = [
-                claim.get("claim_ref") or "",
-                claim.get("shipment") or "",
-                event.get("created_at") or "",
-                _label(event.get("status"), STATUS_EN, english),
-                event.get("note") or "",
-                event.get("author") or "",
-            ]
-            for column_index, value in enumerate(values, start=1):
-                cell = history_sheet.cell(row=row_index, column=column_index, value=value)
-                cell.border = CELL_BORDER
-                cell.alignment = Alignment(vertical="top", wrap_text=column_index == 5)
-            row_index += 1
-    if row_index == 2:
-        history_sheet.cell(
-            row=2, column=1, value="No updates recorded." if english else "Nessun aggiornamento registrato."
+        history_sheet = workbook.create_sheet("Status history" if english else "Storico stati")
+        history_headers = (
+            ["Claim", "Shipment", "Date", "Status", "Note", "Author"]
+            if english
+            else ["Claim", "Spedizione", "Data", "Stato", "Nota", "Autore"]
         )
-    _autosize(history_sheet, [14, 14, 20, 20, 50, 18])
-    history_sheet.freeze_panes = "A2"
+        _style_header(history_sheet, history_headers)
+        row_index = 2
+        for claim in claims:
+            for event in sorted(claim.get("events") or [], key=lambda item: int(item.get("id") or 0)):
+                values = [
+                    claim.get("claim_ref") or "",
+                    claim.get("shipment") or "",
+                    event.get("created_at") or "",
+                    _label(event.get("status"), STATUS_EN, english),
+                    event.get("note") or "",
+                    event.get("author") or "",
+                ]
+                for column_index, value in enumerate(values, start=1):
+                    cell = history_sheet.cell(row=row_index, column=column_index, value=value)
+                    cell.border = CELL_BORDER
+                    cell.alignment = Alignment(vertical="top", wrap_text=column_index == 5)
+                row_index += 1
+        if row_index == 2:
+            history_sheet.cell(
+                row=2, column=1, value="No updates recorded." if english else "Nessun aggiornamento registrato."
+            )
+        _autosize(history_sheet, [14, 14, 20, 20, 50, 18])
+        history_sheet.freeze_panes = "A2"
+
 
     downloads_dir.mkdir(parents=True, exist_ok=True)
     prefix = "VTech_claims_EN" if english else "VTech_claim"
