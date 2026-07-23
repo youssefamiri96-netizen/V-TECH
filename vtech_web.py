@@ -72,6 +72,7 @@ from vtech_app import (
     set_manual_carrier,
     set_manual_freight_code,
     set_manual_pallets,
+    remove_order_from_shipment,
     set_manual_passive_cost,
     set_manual_service_level,
     set_required_delivery_date,
@@ -89,6 +90,7 @@ from vtech_claims import (
     delete_claim_attachment,
     export_claims_report,
     init_claims_db,
+    strip_economics_for_claims,
     update_claim,
 )
 
@@ -126,11 +128,13 @@ SCAN_LOCK = threading.Lock()
 
 FULL_ACCESS_ROLES = {"admin", "backup", "operator"}
 BILLING_ACCESS_ROLES = FULL_ACCESS_ROLES | {"billing"}
+CLAIMS_ACCESS_ROLES = FULL_ACCESS_ROLES | {"claims"}
 USER_ROLES = {
     "admin": "Admin",
     "backup": "Backup operativo",
     "operator": "Operativo",
     "billing": "Fatturazione",
+    "claims": "Claim / magazzino",
 }
 PUBLIC_POST_PATHS = {"/api/login"}
 PUBLIC_GET_PATHS = {"/login.html"}
@@ -140,6 +144,9 @@ BILLING_POST_PATHS = {
     "/api/active-export",
     "/api/fuel-settings",
     "/api/open-path",
+}
+CLAIMS_POST_PATHS = {
+    "/api/claims",
 }
 FULL_POST_PATHS = {
     "/api/import",
@@ -404,6 +411,14 @@ def has_billing_access(user: dict[str, str] | None) -> bool:
     return clean_text((user or {}).get("role")) in BILLING_ACCESS_ROLES
 
 
+def has_claims_access(user: dict[str, str] | None) -> bool:
+    return clean_text((user or {}).get("role")) in CLAIMS_ACCESS_ROLES
+
+
+def is_claims_only(user: dict[str, str] | None) -> bool:
+    return clean_text((user or {}).get("role")) == "claims"
+
+
 def has_admin_access(user: dict[str, str] | None) -> bool:
     return clean_text((user or {}).get("role")) == "admin"
 
@@ -652,6 +667,8 @@ def grouped_shipments(user: dict[str, str] | None = None) -> dict[str, Any]:
         "auth": {
             "user": user or {},
             "billingOnly": bool(user and not has_full_access(user) and has_billing_access(user)),
+            "claimsOnly": bool(user and is_claims_only(user)),
+            "canClaims": has_claims_access(user),
             "canAdmin": has_admin_access(user),
             "roles": USER_ROLES,
             "cloudMode": cloud_mode_enabled(),
@@ -1579,7 +1596,10 @@ class VTechWebHandler(BaseHTTPRequestHandler):
                 self._redirect_to_login()
             return
         if path == "/api/shipments":
-            self._send_json(grouped_shipments(user))
+            shipments_payload = grouped_shipments(user)
+            if is_claims_only(user):
+                shipments_payload = strip_economics_for_claims(shipments_payload)
+            self._send_json(shipments_payload)
             return
         if path == "/api/users":
             if not has_admin_access(user):
@@ -1588,9 +1608,15 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "users": list_auth_users_payload(), "roles": USER_ROLES})
             return
         if path == "/api/claims":
+            if not has_claims_access(user):
+                self._forbidden()
+                return
             self._send_json({"ok": True, **claims_payload()})
             return
         if path == "/api/claim-attachment":
+            if not has_claims_access(user):
+                self._forbidden()
+                return
             query = parse_qs(parsed.query)
             raw_id = clean_text((query.get("id") or [""])[0])
             if not raw_id.isdigit():
@@ -1645,6 +1671,9 @@ class VTechWebHandler(BaseHTTPRequestHandler):
                 self._forbidden()
                 return
             if parsed.path in BILLING_POST_PATHS and not has_billing_access(user):
+                self._forbidden()
+                return
+            if parsed.path in CLAIMS_POST_PATHS and not has_claims_access(user):
                 self._forbidden()
                 return
 
@@ -1998,6 +2027,24 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             pallets = body.get("pallets")
             for shipment in shipments:
                 set_manual_pallets(shipment, pallets, active_path, brt_path, clear=clear_manual)
+        elif action == "remove_order":
+            settings = load_settings()
+            active_path = Path(settings.get("active_rates_path", "")) if settings.get("active_rates_path") else None
+            brt_path = Path(settings.get("brt_passive_path", "")) if settings.get("brt_passive_path") else None
+            order = clean_text(body.get("order"))
+            if not order:
+                raise ValueError("Indica l'ordine da togliere.")
+            if len(shipments) != 1:
+                raise ValueError("Seleziona una sola spedizione per togliere un ordine.")
+            remove_order_from_shipment(
+                shipments[0],
+                order,
+                active_path,
+                brt_path,
+                remaining_goods_weight=body.get("remainingWeight"),
+                remaining_pallets=body.get("remainingPallets"),
+                remaining_volume=body.get("remainingVolume"),
+            )
         elif action in {"unload_date", "unload_booking"}:
             clear_unload = bool(body.get("clear"))
             unload_date = body.get("unloadDate")
