@@ -86,6 +86,10 @@ ATTACHMENT_KINDS = ["Mail", "Foto", "Documento", "Altro"]
 # anche i fogli "Allegati" e "Storico stati".
 EXPORT_DETAIL_SHEETS = False
 
+# Due colonne note nell'export:
+#   notes          -> "Note KN"    (le nostre)
+#   customer_notes -> "Note Vtech" (quelle del cliente)
+
 # Traduzioni per l'export in inglese da mandare al cliente.
 STATUS_EN = {
     "Aperto": "Open",
@@ -215,6 +219,8 @@ def init_claims_db(db_path: Path = DB_PATH) -> None:
         )
         # Migrazione: colonna origin (tipo claim) aggiunta dopo la prima versione.
         existing = {row[1] for row in conn.execute("PRAGMA table_info(claims)").fetchall()}
+        if "customer_notes" not in existing:
+            conn.execute("ALTER TABLE claims ADD COLUMN customer_notes TEXT")
         if "origin" not in existing:
             conn.execute("ALTER TABLE claims ADD COLUMN origin TEXT")
             conn.execute("UPDATE claims SET origin = ? WHERE origin IS NULL OR origin = ''", (DEFAULT_ORIGIN,))
@@ -285,8 +291,8 @@ def create_claim(payload: dict[str, Any], author: str = "", db_path: Path = DB_P
                 claim_ref, shipment, orders_text, customer, province, carrier,
                 shipment_date, reason, description, status, amount_claimed,
                 amount_settled, carrier_ref, opened_at, updated_at, closed_at,
-                created_by, notes, origin
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                created_by, notes, origin, customer_notes
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 claim_ref,
@@ -308,6 +314,7 @@ def create_claim(payload: dict[str, Any], author: str = "", db_path: Path = DB_P
                 clean_text(author),
                 clean_text(payload.get("notes")),
                 clean_text(payload.get("origin")) or claim_origin_for_reason(reason),
+                clean_text(payload.get("customerNotes")),
             ),
         )
         claim_id = int(cursor.lastrowid)
@@ -326,6 +333,7 @@ UPDATABLE_FIELDS = {
     "amountSettled": "amount_settled",
     "carrierRef": "carrier_ref",
     "notes": "notes",
+    "customerNotes": "customer_notes",
     "carrier": "carrier",
 }
 
@@ -616,12 +624,12 @@ def export_claims_report(
         "Claim", "Type", "Shipment", "Orders", "Customer", "Province", "Carrier",
         "Shipment date", "Reason", "Description", "Status", "Carrier ref.",
         "Amount claimed", "Amount settled", "Opened on",
-        "Last update", "Closed on", "Days", "Attachments",
+        "Last update", "Closed on", "Days", "Attachments", "Note KN", "Note Vtech",
     ] if english else [
         "Claim", "Tipo", "Spedizione", "Ordini", "Cliente", "Provincia", "Vettore",
         "Data spedizione", "Motivo", "Descrizione", "Stato", "Rif. vettore",
         "Importo richiesto", "Importo riconosciuto", "Aperto il",
-        "Ultimo aggiornamento", "Chiuso il", "Giorni", "Allegati", "Note",
+        "Ultimo aggiornamento", "Chiuso il", "Giorni", "Allegati", "Note KN", "Note Vtech",
     ]
     _style_header(sheet, headers, row_index=4)
     for offset, claim in enumerate(claims, start=5):
@@ -646,16 +654,16 @@ def export_claims_report(
             claim.get("closed_at") or "",
             _days_open(claim),
             len(attachments),
+            claim.get("notes") or "",
+            claim.get("customer_notes") or "",
         ]
-        if not english:
-            values.append(claim.get("notes") or "")
         for column_index, value in enumerate(values, start=1):
             cell = sheet.cell(row=offset, column=column_index, value=value)
             cell.border = CELL_BORDER
-            cell.alignment = Alignment(vertical="top", wrap_text=column_index in {4, 10, 20})
+            cell.alignment = Alignment(vertical="top", wrap_text=column_index in {4, 10, 20, 21})
             if column_index in {13, 14}:
                 cell.number_format = '#,##0.00 "EUR"'
-    _autosize(sheet, [14, 12, 14, 18, 26, 10, 12, 14, 20, 42, 18, 16, 16, 18, 18, 18, 18, 8, 9, 30])
+    _autosize(sheet, [14, 12, 14, 18, 26, 10, 12, 14, 20, 42, 18, 16, 16, 18, 18, 18, 18, 8, 9, 34, 34])
     sheet.freeze_panes = "A5"
     sheet.auto_filter.ref = f"A4:{get_column_letter(len(headers))}{max(4, 4 + len(claims))}"
 
