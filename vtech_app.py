@@ -3424,19 +3424,22 @@ def export_planned_shipments(
 ) -> Path:
     rows = load_shipments_from_db(db_path)
     normalized_date = clean_text(planned_date)
-    planned_rows = [row for row in rows if clean_text(row.get("Stato")) == STATUS_PLANNED]
+    selected_rows = [
+        row for row in rows
+        if clean_text(row.get("Stato")) in {STATUS_PLANNED, STATUS_DEPARTED}
+    ]
     if normalized_date:
-        planned_rows = [
-            row for row in planned_rows
+        selected_rows = [
+            row for row in selected_rows
             if iso_date_text(row.get("Data Pianifica")) == normalized_date
         ]
 
-    if not planned_rows:
+    if not selected_rows:
         if normalized_date:
-            raise ValueError(f"Nessuna spedizione pianificata con partenza {format_date_only(normalized_date)}.")
-        raise ValueError("Nessuna spedizione pianificata da esportare.")
+            raise ValueError(f"Nessuna spedizione pianificata o comunicata con partenza {format_date_only(normalized_date)}.")
+        raise ValueError("Nessuna spedizione pianificata o comunicata da esportare.")
 
-    planned_rows.sort(
+    selected_rows.sort(
         key=lambda row: (
             parse_date_value(row.get("Data Pianifica")) or date.max,
             clean_text(row.get("Shipment")),
@@ -3444,16 +3447,24 @@ def export_planned_shipments(
     )
 
     columns = [column for column in DISPLAY_COLUMNS if column not in PLANNED_EXPORT_EXCLUDED_COLUMNS]
+    if "Data Pianifica" in columns:
+        columns.insert(columns.index("Data Pianifica") + 1, "Data Partenza")
+    else:
+        columns.append("Data Partenza")
 
     workbook = Workbook()
     sheet = workbook.active
-    sheet.title = "Pianificate"
-    workbook.properties.title = "V-Tech spedizioni pianificate"
-    workbook.properties.subject = "Elenco spedizioni pianificate"
+    sheet.title = "Spedizioni"
+    workbook.properties.title = "V-Tech spedizioni pianificate e comunicate"
+    workbook.properties.subject = "Elenco spedizioni pianificate e comunicate a BRT"
 
-    sheet.append(["Tipo", *[COLUMN_TITLES.get(column, column) for column in columns]])
-    for row in planned_rows:
-        values: list[Any] = ["Groupage BRT" if is_brt_groupage(row) else "FTL / LTL"]
+    sheet.append(["Tipo", "Stato", *[COLUMN_TITLES.get(column, column) for column in columns]])
+    for row in selected_rows:
+        stato = clean_text(row.get("Stato"))
+        values: list[Any] = [
+            "Groupage BRT" if is_brt_groupage(row) else "FTL / LTL",
+            "Comunicata BRT" if stato == STATUS_DEPARTED else stato,
+        ]
         for column in columns:
             if column in PLANNED_EXPORT_NUMERIC_COLUMNS or column in PLANNED_EXPORT_MONEY_COLUMNS:
                 number = to_float(row.get(column))
@@ -3464,13 +3475,13 @@ def export_planned_shipments(
                 values.append(display_value(row, column))
         sheet.append(values)
 
-    money_indexes = [index + 2 for index, column in enumerate(columns) if column in PLANNED_EXPORT_MONEY_COLUMNS]
-    numeric_indexes = [index + 2 for index, column in enumerate(columns) if column in PLANNED_EXPORT_NUMERIC_COLUMNS]
+    money_indexes = [index + 3 for index, column in enumerate(columns) if column in PLANNED_EXPORT_MONEY_COLUMNS]
+    numeric_indexes = [index + 3 for index, column in enumerate(columns) if column in PLANNED_EXPORT_NUMERIC_COLUMNS]
     _style_passive_sheet(sheet, money_columns=money_indexes, numeric_columns=numeric_indexes)
     for index, column in enumerate(columns):
         if column not in DATE_ONLY_COLUMNS:
             continue
-        for column_cells in sheet.iter_cols(min_col=index + 2, max_col=index + 2, min_row=2):
+        for column_cells in sheet.iter_cols(min_col=index + 3, max_col=index + 3, min_row=2):
             for cell in column_cells:
                 if isinstance(cell.value, date):
                     cell.number_format = "dd/mm/yyyy"
@@ -3481,10 +3492,10 @@ def export_planned_shipments(
 
     downloads_dir.mkdir(parents=True, exist_ok=True)
     suffix = normalized_date if normalized_date else "tutte"
-    output_path = downloads_dir / f"VTech_spedizioni_pianificate_{suffix}.xlsx"
+    output_path = downloads_dir / f"VTech_spedizioni_pianificate_e_comunicate_{suffix}.xlsx"
     workbook.save(output_path)
     if not output_path.exists() or output_path.stat().st_size == 0:
-        raise OSError(f"Excel spedizioni pianificate non creato correttamente: {output_path}")
+        raise OSError(f"Excel spedizioni non creato correttamente: {output_path}")
     return output_path
 
 

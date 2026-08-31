@@ -3097,7 +3097,7 @@ els.exportPlannedBtn.addEventListener("click", async () => {
       body: JSON.stringify({ plannedDate }),
     });
     const scope = plannedDate ? `con partenza ${plannedDate.split("-").reverse().join("/")}` : "(tutte)";
-    showToast(`Excel spedizioni pianificate ${scope} creato: ${payload.file}. Clicca qui per aprirlo.`, {
+    showToast(`Excel spedizioni pianificate e comunicate BRT ${scope} creato: ${payload.file}. Clicca qui per aprirlo.`, {
       openPath: payload.path,
       downloadUrl: payload.downloadUrl || "",
     });
