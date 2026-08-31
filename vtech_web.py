@@ -50,6 +50,7 @@ from vtech_app import (
     display_value,
     export_active_billing_report,
     export_passive_billing_by_carrier,
+    export_planned_shipments,
     find_outbound_reports,
     format_number,
     is_imported_file_current,
@@ -153,6 +154,7 @@ FULL_POST_PATHS = {
     "/api/upload-file",
     "/api/groupage-mail",
     "/api/ftl-mail",
+    "/api/planned-export",
     "/api/scan-downloads",
     "/api/action",
 }
@@ -1692,6 +1694,9 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/passive-export":
                 self._handle_passive_export(body, user)
                 return
+            if parsed.path == "/api/planned-export":
+                self._handle_planned_export(body, user)
+                return
             if parsed.path == "/api/active-export":
                 self._handle_active_export(body, user)
                 return
@@ -1883,6 +1888,17 @@ class VTechWebHandler(BaseHTTPRequestHandler):
     def _handle_passive_export(self, body: dict[str, Any], user: dict[str, str]) -> None:
         month = clean_text(body.get("month"))
         output_path = export_passive_billing_by_carrier(month or None)
+        self._send_json({
+            "ok": True,
+            "file": output_path.name,
+            "path": str(output_path),
+            "downloadUrl": download_url_for_path(output_path),
+            "data": grouped_shipments(user),
+        })
+
+    def _handle_planned_export(self, body: dict[str, Any], user: dict[str, str]) -> None:
+        planned_date = clean_text(body.get("plannedDate"))
+        output_path = export_planned_shipments(planned_date or None)
         self._send_json({
             "ok": True,
             "file": output_path.name,

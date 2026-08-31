@@ -189,6 +189,7 @@ const els = {
   applyPlannedDateBtn: document.querySelector("#applyPlannedDateBtn"),
   todayPlannedFilter: document.querySelector("#todayPlannedFilter"),
   clearPlannedFilter: document.querySelector("#clearPlannedFilter"),
+  exportPlannedBtn: document.querySelector("#exportPlannedBtn"),
   plannedFilterInfo: document.querySelector("#plannedFilterInfo"),
   vtechPath: document.querySelector("#vtechPath"),
   activePath: document.querySelector("#activePath"),
@@ -3086,6 +3087,23 @@ els.clearPlannedFilter.addEventListener("click", () => {
   state.selected.clear();
   render();
   clearDetail();
+});
+
+els.exportPlannedBtn.addEventListener("click", async () => {
+  const plannedDate = state.plannedDateManual ? state.plannedDate : "";
+  try {
+    const payload = await api("/api/planned-export", {
+      method: "POST",
+      body: JSON.stringify({ plannedDate }),
+    });
+    const scope = plannedDate ? `con partenza ${plannedDate.split("-").reverse().join("/")}` : "(tutte)";
+    showToast(`Excel spedizioni pianificate ${scope} creato: ${payload.file}. Clicca qui per aprirlo.`, {
+      openPath: payload.path,
+      downloadUrl: payload.downloadUrl || "",
+    });
+  } catch (error) {
+    showToast(error.message);
+  }
 });
 
 els.todayDepartedFilter.addEventListener("click", () => {
