@@ -97,7 +97,47 @@ STATUS_DEPARTED = "Partita"
 STATUS_CONFIRMED = "FTL Confermata"
 STATUS_DELIVERED = "Consegnata"
 AVAILABLE_CARRIERS = ["BRT", "KN", "GRENDI", "GD TRASPORTI", "DB", "FERCAM", "DACHSER", "DHL", "GEODIS", "DSV", "ALTRO"]
+CUSTOM_CARRIERS_PATH = DATA_DIR / "custom_carriers.json"
 EMPTY_FILTER_VALUE = "__EMPTY__"
+
+
+def load_custom_carriers() -> list[str]:
+    try:
+        raw = json.loads(CUSTOM_CARRIERS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    carriers: list[str] = []
+    for item in raw if isinstance(raw, list) else []:
+        name = str(item or "").strip().upper()
+        if name and name not in carriers:
+            carriers.append(name)
+    return carriers
+
+
+def available_carriers() -> list[str]:
+    carriers = [carrier for carrier in AVAILABLE_CARRIERS if carrier != "ALTRO"]
+    for name in sorted(load_custom_carriers()):
+        if name not in carriers:
+            carriers.append(name)
+    carriers.append("ALTRO")
+    return carriers
+
+
+def register_custom_carrier(name: Any) -> str:
+    carrier = str(name or "").strip().upper()
+    if not carrier:
+        raise ValueError("Il nome del vettore non puo essere vuoto.")
+    if carrier == "ALTRO" or carrier in AVAILABLE_CARRIERS:
+        return carrier
+    customs = load_custom_carriers()
+    if carrier not in customs:
+        customs.append(carrier)
+        CUSTOM_CARRIERS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        CUSTOM_CARRIERS_PATH.write_text(
+            json.dumps(sorted(customs), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    return carrier
 DATE_ONLY_COLUMNS = {
     "Late Ship Date",
     "Early Delivery Date",
@@ -5490,8 +5530,9 @@ End If
             else f"{len(selected_shipments)} spedizioni selezionate"
         )
         ttk.Label(frame, text=title, font=("Segoe UI Semibold", 11)).pack(anchor="w", pady=(0, 10))
-        carrier_var = tk.StringVar(value=current_carrier if current_carrier in AVAILABLE_CARRIERS else (current_carrier or "BRT"))
-        combo = ttk.Combobox(frame, textvariable=carrier_var, values=AVAILABLE_CARRIERS, state="readonly")
+        carrier_choices = available_carriers()
+        carrier_var = tk.StringVar(value=current_carrier if current_carrier in carrier_choices else (current_carrier or "BRT"))
+        combo = ttk.Combobox(frame, textvariable=carrier_var, values=carrier_choices, state="readonly")
         combo.pack(fill=tk.X)
 
         def apply_choice() -> None:
@@ -5501,6 +5542,7 @@ End If
                 selected = clean_text(custom).upper()
                 if not selected:
                     return
+                register_custom_carrier(selected)
             try:
                 for shipment in selected_shipments:
                     set_manual_carrier(

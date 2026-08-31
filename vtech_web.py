@@ -26,7 +26,6 @@ from typing import Any
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from vtech_app import (
-    AVAILABLE_CARRIERS,
     COLUMN_TITLES,
     CUSTOMER_REGISTRY_PATH,
     DEFAULT_ACTIVE_PATH,
@@ -42,6 +41,7 @@ from vtech_app import (
     STATUS_DEPARTED,
     STATUS_DELIVERED,
     STATUS_PLANNED,
+    available_carriers,
     billing_reference_date,
     ceil_pallets,
     clean_text,
@@ -64,6 +64,7 @@ from vtech_app import (
     mark_planned,
     mark_unplanned,
     purge_deleted_shipments,
+    register_custom_carrier,
     restore_deleted_shipments,
     run_import,
     save_settings,
@@ -620,7 +621,7 @@ def grouped_shipments(user: dict[str, str] | None = None) -> dict[str, Any]:
             for column in DISPLAY_COLUMNS
             if column not in GROUPAGE_MAIL_EXCLUDED_COLUMNS
         ],
-        "carriers": AVAILABLE_CARRIERS,
+        "carriers": available_carriers(),
         "gdoCustomers": load_gdo_customer_records(),
         "customers": load_customer_registry_records(),
         "fuelSettings": load_monthly_fuel_settings(),
@@ -1996,6 +1997,7 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             carrier = clean_text(body.get("carrier")).upper()
             if not carrier:
                 raise ValueError("Scegli un vettore.")
+            carrier = register_custom_carrier(carrier)
             settings = load_settings()
             active_path = Path(settings.get("active_rates_path", "")) if settings.get("active_rates_path") else None
             brt_path = Path(settings.get("brt_passive_path", "")) if settings.get("brt_passive_path") else None

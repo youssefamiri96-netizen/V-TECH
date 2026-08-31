@@ -132,6 +132,7 @@ const els = {
   toast: document.querySelector("#toast"),
   carrierDialog: document.querySelector("#carrierDialog"),
   carrierSelect: document.querySelector("#carrierSelect"),
+  newCarrierInput: document.querySelector("#newCarrierInput"),
   serviceLevelBtn: document.querySelector("#serviceLevelBtn"),
   serviceLevelDialog: document.querySelector("#serviceLevelDialog"),
   serviceLevelSelect: document.querySelector("#serviceLevelSelect"),
@@ -3691,6 +3692,7 @@ document.querySelector("#carrierBtn").addEventListener("click", () => {
     return;
   }
   els.carrierSelect.innerHTML = state.data.carriers.map(carrier => `<option>${escapeHtml(carrier)}</option>`).join("");
+  els.newCarrierInput.value = "";
   els.carrierDialog.showModal();
 });
 
@@ -3834,10 +3836,18 @@ els.activeUrgentBtn.addEventListener("click", () => {
 
 document.querySelector("#applyCarrierBtn").addEventListener("click", async (event) => {
   event.preventDefault();
-  const carrier = els.carrierSelect.value;
+  const newCarrier = els.newCarrierInput.value.trim().toUpperCase();
+  const carrier = newCarrier || els.carrierSelect.value;
+  if (carrier === "ALTRO" && !newCarrier) {
+    showToast("Per un vettore nuovo scrivi il nome nel campo dedicato.");
+    return;
+  }
   els.carrierDialog.close();
   try {
     await performAction("carrier", { carrier });
+    if (newCarrier) {
+      showToast(`Vettore ${newCarrier} assegnato e aggiunto all'elenco.`);
+    }
   } catch (error) {
     showToast(error.message);
   }

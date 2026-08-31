@@ -189,6 +189,11 @@
       <h2>Scegli vettore</h2>
       <p>Il vettore verra applicato alle spedizioni selezionate.</p>
       <select id="carrierSelect"></select>
+      <label>
+        <span>Oppure aggiungi un vettore nuovo</span>
+        <input id="newCarrierInput" placeholder="Nome nuovo vettore (es. TNT)" autocomplete="off" />
+      </label>
+      <p class="hint">Se scrivi un nome qui, verra usato al posto della selezione e salvato nell'elenco per le prossime volte.</p>
       <menu>
         <button value="cancel">Annulla</button>
         <button class="primary" value="apply" id="applyCarrierBtn">Applica</button>
@@ -375,7 +380,7 @@
   </dialog>
 
   <div class="toast" id="toast" role="status"></div>
-  <script src="/app.js?v=planned-export-20260831b"></script>
+  <script src="/app.js?v=custom-carriers-20260831"></script>
   <script src="/claims.js?v=claims-20260723"></script>
 </body>
 </html>
