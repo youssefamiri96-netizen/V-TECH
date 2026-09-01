@@ -3099,7 +3099,11 @@ def export_passive_billing_by_carrier(
         if normalized_month and f"{ref_date.year:04d}-{ref_date.month:02d}" != normalized_month:
             continue
         passive = to_float(row.get("Costo Passivo"))
-        if passive is None or passive <= 0:
+        has_passive = passive is not None and passive > 0
+        # Le spedizioni senza passivo entrano comunque nell'export se hanno un
+        # vettore assegnato (es. FTL in attesa della passiva manuale), cosi
+        # restano visibili e completabili nel file.
+        if not has_passive and not clean_text(row.get("Carrier Scelto")):
             continue
         selected.append((ref_date, row))
 
@@ -3119,7 +3123,7 @@ def export_passive_billing_by_carrier(
     workbook.properties.title = "V-Tech passivo vettori"
     workbook.properties.subject = "Dettaglio passivo per vettore"
 
-    summary_headers = ["Vettore", "Spedizioni", "Trasporto", "Extra", "Passivo totale", "Peso totale kg", "Pallet fatt."]
+    summary_headers = ["Vettore", "Spedizioni", "Trasporto", "Extra", "Passivo totale", "Peso totale kg", "Pallet fatt.", "Senza passivo"]
     summary.append(summary_headers)
     for carrier, carrier_rows in sorted(by_carrier.items()):
         transport = sum(to_float(row.get("Costo Passivo Base BRT")) or 0 for _date, row in carrier_rows)
@@ -3127,7 +3131,8 @@ def export_passive_billing_by_carrier(
         passive = sum(to_float(row.get("Costo Passivo")) or 0 for _date, row in carrier_rows)
         weight = sum(to_float(row.get("Grand Total Shipment Ftp Wgt Kg")) or 0 for _date, row in carrier_rows)
         pallets = sum(to_float(row.get("Pallet Fatturati")) or 0 for _date, row in carrier_rows)
-        summary.append([carrier, len(carrier_rows), transport, extras, passive, weight, pallets])
+        missing = sum(1 for _date, row in carrier_rows if not ((cost := to_float(row.get("Costo Passivo"))) is not None and cost > 0))
+        summary.append([carrier, len(carrier_rows), transport, extras, passive, weight, pallets, missing])
 
     total_row = summary.max_row + 1
     summary.append([
@@ -3138,12 +3143,16 @@ def export_passive_billing_by_carrier(
         f"=SUM(E2:E{total_row - 1})",
         f"=SUM(F2:F{total_row - 1})",
         f"=SUM(G2:G{total_row - 1})",
+        f"=SUM(H2:H{total_row - 1})",
     ])
     for cell in summary[total_row]:
         cell.font = Font(bold=True)
         cell.fill = PatternFill("solid", fgColor="E0F2FE")
-    _style_passive_sheet(summary, money_columns=[3, 4, 5], numeric_columns=[2, 6, 7])
-    summary_table = Table(displayName="RiepilogoPassivo", ref=f"A1:G{summary.max_row}")
+    _style_passive_sheet(summary, money_columns=[3, 4, 5], numeric_columns=[2, 6, 7, 8])
+    for column_cells in summary.iter_cols(min_col=8, max_col=8, min_row=2):
+        for cell in column_cells:
+            cell.number_format = "0"
+    summary_table = Table(displayName="RiepilogoPassivo", ref=f"A1:H{summary.max_row}")
     summary_table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True, showFirstColumn=False, showLastColumn=False)
     summary.add_table(summary_table)
 
@@ -3179,10 +3188,13 @@ def export_passive_billing_by_carrier(
         sheet = workbook.create_sheet(_safe_sheet_title(carrier, used_titles))
         sheet.append(detail_headers)
         group_fills: list[tuple[int, int, PatternFill]] = []
+        missing_fill = PatternFill("solid", fgColor="FEF3C7")
         for group_index, (ref_date, row) in enumerate(carrier_rows):
             orders = billing_order_numbers(row)
             order_count = max(1, len(orders))
             first_row = sheet.max_row + 1
+            passive_cost = to_float(row.get("Costo Passivo"))
+            row_missing_passive = passive_cost is None or passive_cost <= 0
             extra_amounts = parse_billing_extra_amounts(row.get("Extra BRT Applicati"))
             for order_index, order_number in enumerate(orders):
                 sheet.append([
@@ -3204,10 +3216,10 @@ def export_passive_billing_by_carrier(
                         for label in passive_extra_columns
                     ],
                     split_billing_value(row.get("Costo Passivo"), order_index, order_count),
-                    clean_text(row.get("Tariffa Passiva Applicata")),
+                    clean_text(row.get("Tariffa Passiva Applicata")) or ("PASSIVO DA INSERIRE" if row_missing_passive else ""),
                     clean_text(row.get("Extra BRT Applicati")),
                 ])
-            group_fills.append((first_row, sheet.max_row, billing_group_fill(group_index)))
+            group_fills.append((first_row, sheet.max_row, missing_fill if row_missing_passive else billing_group_fill(group_index)))
         total = sheet.max_row + 1
         total_values: list[Any] = [""] * len(detail_headers)
         total_values[0] = "Totale"
