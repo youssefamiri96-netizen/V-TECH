@@ -98,6 +98,7 @@ STATUS_CONFIRMED = "FTL Confermata"
 STATUS_DELIVERED = "Consegnata"
 AVAILABLE_CARRIERS = ["BRT", "KN", "GRENDI", "GD TRASPORTI", "DB", "FERCAM", "DACHSER", "DHL", "GEODIS", "DSV", "ALTRO"]
 CUSTOM_CARRIERS_PATH = DATA_DIR / "custom_carriers.json"
+MANUAL_NOTE_MAX_CHARS = 400
 EMPTY_FILTER_VALUE = "__EMPTY__"
 
 
@@ -410,6 +411,7 @@ DISPLAY_COLUMNS = [
     "Attiva Urgente",
     "Prenotazione Scarico",
     "Note Text",
+    "Note Operative",
     "Late Ship Date",
     "Early Delivery Date",
     "Data Consegna Tassativa",
@@ -447,6 +449,7 @@ COLUMN_TITLES = {
     "Attiva Urgente": "Urgente",
     "Prenotazione Scarico": "Prenotazione",
     "Note Text": "Note",
+    "Note Operative": "Note operative",
     "Late Ship Date": "Late ship",
     "Early Delivery Date": "Early delivery",
     "Early Delivery Date Originale": "Early originale",
@@ -509,6 +512,7 @@ COLUMN_WIDTHS = {
     "Attiva Urgente": 80,
     "Prenotazione Scarico": 145,
     "Note Text": 190,
+    "Note Operative": 210,
     "Late Ship Date": 130,
     "Early Delivery Date": 130,
     "Early Delivery Date Originale": 140,
@@ -1117,6 +1121,8 @@ def init_db(db_path: Path = DB_PATH) -> None:
             conn.execute("ALTER TABLE shipments ADD COLUMN unload_booking_ref TEXT")
         if "required_delivery_date" not in existing_columns:
             conn.execute("ALTER TABLE shipments ADD COLUMN required_delivery_date TEXT")
+        if "manual_note" not in existing_columns:
+            conn.execute("ALTER TABLE shipments ADD COLUMN manual_note TEXT")
 
 
 def file_fingerprint(path: Path) -> tuple[int, int]:
@@ -1569,7 +1575,7 @@ def save_shipments_to_db(shipments: list[dict[str, Any]], source_file: Path, db_
             SELECT shipment, orders_text, status, delivered_at, manual_carrier,
                    manual_passive_cost, manual_service_level, manual_freight_code,
                    required_delivery_date, manual_pallets, unload_date, unload_time,
-                   unload_booking_ref, planned_at
+                   unload_booking_ref, planned_at, manual_note
             FROM shipments
             """
         ).fetchall()
@@ -1624,6 +1630,8 @@ def save_shipments_to_db(shipments: list[dict[str, Any]], source_file: Path, db_
             unload_time = existing[11] if existing and clean_text(existing[11]) else clean_text(row.get("Ora Scarico Prenotato"))
             unload_booking_ref = existing[12] if existing and clean_text(existing[12]) else clean_text(row.get("Riferimento Booking Scarico"))
             planned_at = existing[13] if existing and clean_text(existing[13]) else clean_text(row.get("Data Pianifica"))
+            manual_note = clean_text(existing[14]) if existing and len(existing) > 14 and clean_text(existing[14]) else clean_text(row.get("Note Operative"))
+            row["Note Operative"] = manual_note
             if status == STATUS_PLANNED and not clean_text(planned_at):
                 planned_at = wave_departure_iso(row) or date.today().strftime("%Y-%m-%d")
             row["Data Pianifica"] = planned_at
@@ -1658,9 +1666,10 @@ def save_shipments_to_db(shipments: list[dict[str, Any]], source_file: Path, db_
                     shipment, orders_text, service_type, carrier_originale, carrier_scelto, manual_carrier,
                     manual_service_level, manual_freight_code, service_level, freight_code, booking_status, province, customer, active_cost, passive_cost,
                     manual_passive_cost, manual_pallets, margin,
-                    status, planned_at, unload_date, unload_time, unload_booking_ref, required_delivery_date, delivered_at, source_file, imported_at, payload_json
+                    status, planned_at, unload_date, unload_time, unload_booking_ref, required_delivery_date, delivered_at, source_file, imported_at, payload_json,
+                    manual_note
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(shipment) DO UPDATE SET
                     orders_text = excluded.orders_text,
                     service_type = excluded.service_type,
@@ -1688,7 +1697,8 @@ def save_shipments_to_db(shipments: list[dict[str, Any]], source_file: Path, db_
                     delivered_at = excluded.delivered_at,
                     source_file = excluded.source_file,
                     imported_at = excluded.imported_at,
-                    payload_json = excluded.payload_json
+                    payload_json = excluded.payload_json,
+                    manual_note = excluded.manual_note
                 """,
                 (
                     shipment,
@@ -1719,6 +1729,7 @@ def save_shipments_to_db(shipments: list[dict[str, Any]], source_file: Path, db_
                     str(source_file),
                     imported_at,
                     serialize_shipment_payload(row),
+                    manual_note,
                 ),
             )
 
@@ -2207,6 +2218,39 @@ def normalize_saved_date_columns(db_path: Path = DB_PATH) -> int:
     with sqlite3.connect(db_path) as conn:
         conn.executemany("UPDATE shipments SET payload_json = ? WHERE shipment = ?", updates)
     return len(updates)
+
+
+def set_manual_note(
+    shipment: str,
+    note: Any,
+    db_path: Path = DB_PATH,
+) -> dict[str, Any]:
+    """Salva la nota operativa scritta dall'utente sulla spedizione.
+
+    Resta separata da "Note Text", che arriva dal report e viene riscritta a
+    ogni import: questa invece sopravvive agli import successivi.
+    """
+    row = get_shipment_from_db(shipment, db_path)
+    if row is None:
+        raise ValueError(f"Spedizione non trovata: {shipment}")
+
+    note_clean = " ".join(clean_text(note).split())
+    if len(note_clean) > MANUAL_NOTE_MAX_CHARS:
+        raise ValueError(f"La nota non puo superare {MANUAL_NOTE_MAX_CHARS} caratteri.")
+    row["Note Operative"] = note_clean
+
+    init_db(db_path)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE shipments
+            SET manual_note = ?,
+                payload_json = ?
+            WHERE shipment = ?
+            """,
+            (note_clean, serialize_shipment_payload(row), shipment),
+        )
+    return row
 
 
 def set_manual_carrier(

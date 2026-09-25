@@ -47,6 +47,7 @@ SHIPMENT_COLUMNS = [
     "Order Type",
     "Order Ordered Qty",
     "Note Text",
+    "Note Operative",
     "Carrier Originale",
     "Carrier Scelto",
     "Service Level",

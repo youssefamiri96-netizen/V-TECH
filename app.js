@@ -151,6 +151,10 @@ const els = {
   manualPassiveInput: document.querySelector("#manualPassiveInput"),
   manualPalletsBtn: document.querySelector("#manualPalletsBtn"),
   manualPalletsDialog: document.querySelector("#manualPalletsDialog"),
+  manualNoteBtn: document.querySelector("#manualNoteBtn"),
+  manualNoteDialog: document.querySelector("#manualNoteDialog"),
+  manualNoteInput: document.querySelector("#manualNoteInput"),
+  manualNoteCount: document.querySelector("#manualNoteCount"),
   manualPalletsInput: document.querySelector("#manualPalletsInput"),
   plannedDateBtn: document.querySelector("#plannedDateBtn"),
   unloadDateBtn: document.querySelector("#unloadDateBtn"),
@@ -342,6 +346,7 @@ function render() {
   els.activeUrgentBtn.hidden = isDeleted || isRegistry;
   els.manualPassiveBtn.hidden = isDeleted || isRegistry;
   els.manualPalletsBtn.hidden = isDeleted || isRegistry;
+  els.manualNoteBtn.hidden = isDeleted || isRegistry;
   els.plannedDateBtn.hidden = !isGroupage;
   els.unloadDateBtn.hidden = !isFtl;
   els.deliveredDateBtn.hidden = !isFtl;
@@ -2600,7 +2605,7 @@ async function performAction(action, extra = {}) {
     method: "POST",
     body: JSON.stringify({ action, shipments, ...actionExtra }),
   });
-  await reloadAfterMutation(shipments, { keepSelection: ["carrier", "service_level", "freight_code", "required_delivery_date", "manual_passive", "manual_pallets", "planned_date", "unload_date", "unload_booking", "active_urgent"].includes(action) });
+  await reloadAfterMutation(shipments, { keepSelection: ["carrier", "service_level", "freight_code", "required_delivery_date", "manual_passive", "manual_pallets", "manual_note", "planned_date", "unload_date", "unload_booking", "active_urgent"].includes(action) });
   if (action === "delivered" && payload.xmlFiles?.length) {
     if (payload.downloadUrl) triggerDownload(payload.downloadUrl);
     showToast(`XML creato in Download: ${payload.xmlFiles.join(", ")}. Clicca qui per aprirlo.`, {
@@ -3774,6 +3779,56 @@ els.manualPalletsBtn.addEventListener("click", () => {
   els.manualPalletsInput.value = String(current).trim();
   els.manualPalletsDialog.showModal();
   window.setTimeout(() => els.manualPalletsInput.focus(), 0);
+});
+
+els.manualNoteBtn.addEventListener("click", () => {
+  if (!state.selected.size) {
+    showToast("Seleziona almeno una spedizione.");
+    return;
+  }
+  const shipments = selectedShipments();
+  const row = shipments.length === 1 ? allRows().find(item => item.shipment === shipments[0]) : null;
+  els.manualNoteInput.value = row ? String(row.raw["Note Operative"] || row.display["Note Operative"] || "").trim() : "";
+  updateNoteCount();
+  els.manualNoteDialog.showModal();
+  window.setTimeout(() => els.manualNoteInput.focus(), 0);
+});
+
+function updateNoteCount() {
+  const n = els.manualNoteInput.value.length;
+  els.manualNoteCount.textContent = `${n} / 400 caratteri`;
+}
+
+els.manualNoteInput.addEventListener("input", updateNoteCount);
+
+document.querySelector("#applyManualNoteBtn").addEventListener("click", async (event) => {
+  event.preventDefault();
+  const note = els.manualNoteInput.value.trim();
+  if (!note) {
+    showToast("Scrivi la nota, oppure usa Togli nota per cancellarla.");
+    return;
+  }
+  const count = selectedShipments().length;
+  els.manualNoteDialog.close();
+  try {
+    await performAction("manual_note", { note });
+    showToast(count === 1
+      ? "Nota salvata. Comparira nella mail al vettore."
+      : `Nota applicata a ${count} spedizioni. Comparira nella mail al vettore.`);
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+document.querySelector("#clearManualNoteBtn").addEventListener("click", async (event) => {
+  event.preventDefault();
+  els.manualNoteDialog.close();
+  try {
+    await performAction("manual_note", { note: "" });
+    showToast("Nota rimossa.");
+  } catch (error) {
+    showToast(error.message);
+  }
 });
 
 els.plannedDateBtn.addEventListener("click", async () => {

@@ -73,6 +73,7 @@ from vtech_app import (
     serialize,
     set_manual_carrier,
     set_manual_freight_code,
+    set_manual_note,
     set_manual_pallets,
     remove_order_from_shipment,
     set_manual_passive_cost,
@@ -117,6 +118,7 @@ FTL_MAIL_COLUMNS = [
     "Prenotazione Scarico",
     "Booking Scarico",
     "Note Text",
+    "Note Operative",
     "Late Ship Date",
     "Early Delivery Date",
     "Data Consegna Tassativa",
@@ -2045,6 +2047,10 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             pallets = body.get("pallets")
             for shipment in shipments:
                 set_manual_pallets(shipment, pallets, active_path, brt_path, clear=clear_manual)
+        elif action == "manual_note":
+            note = body.get("note")
+            for shipment in shipments:
+                set_manual_note(shipment, note)
         elif action == "remove_order":
             settings = load_settings()
             active_path = Path(settings.get("active_rates_path", "")) if settings.get("active_rates_path") else None

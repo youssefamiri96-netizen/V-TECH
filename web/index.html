@@ -106,6 +106,7 @@
               <button id="requiredDeliveryBtn">Data tassativa</button>
               <button id="manualPassiveBtn">Passiva manuale</button>
               <button id="manualPalletsBtn">Bancali manuali</button>
+              <button id="manualNoteBtn">Note operative</button>
               <button id="removeOrderBtn">Rimuovi ordine</button>
               <button id="unloadDateBtn">Booking scarico</button>
               <button id="activeUrgentBtn">Urgente attiva</button>
@@ -301,6 +302,23 @@
     </form>
   </dialog>
 
+  <dialog id="manualNoteDialog">
+    <form method="dialog" class="modal">
+      <h2>Note operative</h2>
+      <p>Scrivi le particolarita da rispettare. La nota resta sulla spedizione e viene riportata nella mail al vettore.</p>
+      <label class="modal-field">
+        <span>Nota per il vettore</span>
+        <textarea id="manualNoteInput" rows="4" maxlength="400" placeholder="es. Consegna solo al mattino, chiedere di Marco al banco accettazione"></textarea>
+      </label>
+      <p class="hint" id="manualNoteCount">0 / 400 caratteri</p>
+      <menu>
+        <button value="cancel">Annulla</button>
+        <button class="danger ghost-danger" value="clear" id="clearManualNoteBtn">Togli nota</button>
+        <button class="primary" value="apply" id="applyManualNoteBtn">Salva nota</button>
+      </menu>
+    </form>
+  </dialog>
+
   <dialog id="removeOrderDialog">
     <form method="dialog" class="modal">
       <h2>Rimuovi ordine dallo shipment</h2>
@@ -380,7 +398,7 @@
   </dialog>
 
   <div class="toast" id="toast" role="status"></div>
-  <script src="/app.js?v=custom-carriers-20260831"></script>
+  <script src="/app.js?v=note-operative-20260925"></script>
   <script src="/claims.js?v=claims-20260723"></script>
 </body>
 </html>
