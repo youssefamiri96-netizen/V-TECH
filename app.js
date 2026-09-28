@@ -1831,51 +1831,69 @@ function setColumnWidth(key, width) {
   });
 }
 
+// Colonne che esistono solo su alcune pagine. Vanno tenute nello stesso elenco
+// ordinato delle altre, altrimenti il trascinamento non le trova e non fa nulla.
+const PAGE_EXTRA_COLUMNS = {
+  ftl: [
+    { key: "Data Scarico Prenotato", title: "Scarico prenotato", after: "Early Delivery Date" },
+    { key: "Data Consegna", title: "Data consegna" },
+    { key: "XML Consegna", title: "XML consegna" },
+  ],
+  groupage: [
+    { key: "Data Partenza", title: "Data spedito", after: "Early Delivery Date" },
+  ],
+  deleted: [
+    { key: "Data Eliminazione", title: "Data eliminazione", first: true },
+  ],
+};
+
+function extraColumnsForPage(page) {
+  return PAGE_EXTRA_COLUMNS[page] || [];
+}
+
+function allExtraColumns() {
+  return Object.values(PAGE_EXTRA_COLUMNS).flat();
+}
+
+function knownColumns() {
+  const base = state.data?.columns || [];
+  const output = [...base];
+  const seen = new Set(base.map(column => column.key));
+  allExtraColumns().forEach(column => {
+    if (seen.has(column.key)) return;
+    seen.add(column.key);
+    output.push({ key: column.key, title: column.title });
+  });
+  return output;
+}
+
 function normalizeColumnOrder(order) {
-  const currentKeys = state.data?.columns?.map(column => column.key) || [];
-  const currentSet = new Set(currentKeys);
-  const ordered = order.filter(key => currentSet.has(key));
-  currentKeys.forEach(key => {
-    if (!ordered.includes(key)) ordered.push(key);
+  const known = knownColumns();
+  const knownSet = new Set(known.map(column => column.key));
+  const ordered = order.filter(key => knownSet.has(key));
+  known.forEach(column => {
+    if (ordered.includes(column.key)) return;
+    const extra = allExtraColumns().find(item => item.key === column.key);
+    if (extra?.first) {
+      ordered.unshift(column.key);
+      return;
+    }
+    const afterIndex = extra?.after ? ordered.indexOf(extra.after) : -1;
+    if (afterIndex >= 0) ordered.splice(afterIndex + 1, 0, column.key);
+    else ordered.push(column.key);
   });
   return ordered;
 }
 
 function orderedColumns() {
-  const columnByKey = new Map((state.data?.columns || []).map(column => [column.key, column]));
+  const columnByKey = new Map(knownColumns().map(column => [column.key, column]));
   return normalizeColumnOrder(state.columnOrder).map(key => columnByKey.get(key)).filter(Boolean);
 }
 
 function displayColumnsForCurrentPage() {
-  const columns = orderedColumns();
-  if (state.page === "deleted") {
-    return columns.some(column => column.key === "Data Eliminazione")
-      ? columns
-      : [{ key: "Data Eliminazione", title: "Data eliminazione" }, ...columns];
-  }
-  if (state.page === "ftl") {
-    const output = [...columns];
-    if (!output.some(column => column.key === "Data Scarico Prenotato")) {
-      const insertAfterIndex = output.findIndex(column => column.key === "Early Delivery Date");
-      const insertIndex = insertAfterIndex >= 0 ? insertAfterIndex + 1 : Math.min(1, output.length);
-      output.splice(insertIndex, 0, { key: "Data Scarico Prenotato", title: "Scarico prenotato" });
-    }
-    if (!output.some(column => column.key === "Data Consegna")) {
-      output.push({ key: "Data Consegna", title: "Data consegna" });
-    }
-    if (!output.some(column => column.key === "XML Consegna")) {
-      output.push({ key: "XML Consegna", title: "XML consegna" });
-    }
-    return output;
-  }
-  if (state.page !== "groupage" || columns.some(column => column.key === "Data Partenza")) {
-    return columns;
-  }
-  const output = [...columns];
-  const insertAfterIndex = output.findIndex(column => column.key === "Early Delivery Date");
-  const insertIndex = insertAfterIndex >= 0 ? insertAfterIndex + 1 : Math.min(1, output.length);
-  output.splice(insertIndex, 0, { key: "Data Partenza", title: "Data spedito" });
-  return output;
+  const baseKeys = new Set((state.data?.columns || []).map(column => column.key));
+  const pageKeys = new Set(extraColumnsForPage(state.page).map(column => column.key));
+  return orderedColumns().filter(column => baseKeys.has(column.key) || pageKeys.has(column.key));
 }
 
 function moveColumn(sourceKey, targetKey) {
