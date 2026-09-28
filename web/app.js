@@ -1063,8 +1063,13 @@ function parseDateValue(value) {
   return null;
 }
 
+// Stessa regola del backend: la competenza segue la data di partenza, quella
+// reale se c'e' gia', altrimenti quella pianificata. Le date del report restano
+// come ripiego per le spedizioni senza nessuna partenza.
 function billingDate(row) {
-  return parseDateValue(row.raw["Late Ship Date"])
+  return parseDateValue(row.raw["Data Partenza"])
+    || parseDateValue(row.raw["Data Pianifica"])
+    || parseDateValue(row.raw["Late Ship Date"])
     || parseDateValue(row.raw["Data Consegna"])
     || parseDateValue(row.raw["Data Consegna Tassativa"])
     || parseDateValue(row.raw["Early Delivery Date"])

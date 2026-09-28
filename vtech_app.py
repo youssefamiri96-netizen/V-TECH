@@ -626,8 +626,22 @@ def day_after_iso(value: Any | None = None) -> str:
     return (base_date + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
+# La competenza di attivo e passivo segue la data di partenza: quella reale se la
+# spedizione e' gia' partita, altrimenti quella pianificata. Le date del report
+# restano solo come ripiego per le righe che non hanno ancora nessuna partenza.
+BILLING_DATE_COLUMNS = (
+    "Data Partenza",
+    "Data Pianifica",
+    "Late Ship Date",
+    "Data Consegna",
+    "Data Consegna Tassativa",
+    "Early Delivery Date",
+    "Integration Date",
+)
+
+
 def billing_reference_date(row: dict[str, Any]) -> date | None:
-    for column in ("Late Ship Date", "Data Consegna", "Data Consegna Tassativa", "Early Delivery Date", "Integration Date"):
+    for column in BILLING_DATE_COLUMNS:
         parsed = parse_date_value(row.get(column))
         if parsed:
             return parsed
