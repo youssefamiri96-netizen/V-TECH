@@ -155,6 +155,7 @@ ACTIVE_ISTAT_BASE_FRACTION = 0.75
 ACTIVE_ISTAT_BASE_FACTOR = 1 + ACTIVE_ISTAT_INDEX_RATE * ACTIVE_ISTAT_BASE_FRACTION  # 1.010425
 ACTIVE_ISTAT_EXTRA_FACTOR = 1 + ACTIVE_ISTAT_INDEX_RATE  # 1.0139
 DEFAULT_CARRIER_TARIFFS_PATH = Path(__file__).resolve().parent / "data" / "carrier_tariffs.csv"
+DEFAULT_MACSPED_TARIFFS_PATH = Path(__file__).resolve().parent / "data" / "macsped_tariffs.csv"
 
 BRT_EXTRA_FLAG_COLUMNS = [
     "Shipment",
@@ -248,6 +249,18 @@ def default_carrier_tariffs_path() -> Path | None:
     if env_data_dir:
         candidates.append(Path(env_data_dir) / "carrier_tariffs.csv")
     candidates.append(DEFAULT_CARRIER_TARIFFS_PATH)
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def default_macsped_tariffs_path() -> Path | None:
+    env_data_dir = clean_text(os.environ.get("VTECH_DATA_DIR"))
+    candidates = []
+    if env_data_dir:
+        candidates.append(Path(env_data_dir) / "macsped_tariffs.csv")
+    candidates.append(DEFAULT_MACSPED_TARIFFS_PATH)
     for path in candidates:
         if path.exists():
             return path
@@ -1260,6 +1273,128 @@ class CarrierPalletRateCard:
         return [result for result in results if result is not None]
 
 
+@dataclass(frozen=True)
+class MacspedWeightBandTariff:
+    region: str
+    weight_from_kg: float
+    weight_to_kg: float
+    rate_per_quintal: float
+
+
+class MacspedPassiveRateCard:
+    """LTL groupage passive rate card for Macsped: EUR per quintale (100 kg) by
+    region and weight band, minimum taxable weight 100 kg.
+
+    Only covers the groupage/LTL grid Macsped quoted for Sanoma/Vtec: Macsped's
+    direct (dirette) shipments are priced separately at a dedicated rate agreed
+    case by case, so they are intentionally not represented here and must never
+    be looked up through this card.
+    """
+
+    def __init__(self, tariffs: list[MacspedWeightBandTariff]) -> None:
+        self.by_region: dict[str, list[MacspedWeightBandTariff]] = {}
+        for tariff in tariffs:
+            self.by_region.setdefault(tariff.region, []).append(tariff)
+        for rules in self.by_region.values():
+            rules.sort(key=lambda item: item.weight_from_kg)
+
+    @classmethod
+    def from_csv(cls, path: Path | None) -> "MacspedPassiveRateCard | None":
+        if not path or not path.exists():
+            return None
+
+        tariffs: list[MacspedWeightBandTariff] = []
+        with path.open("r", newline="", encoding="utf-8-sig") as file:
+            reader = csv.DictReader(file)
+            for row in reader:
+                active = clean_text(row.get("Active") or "SI").upper()
+                if active and active not in TRUE_VALUES:
+                    continue
+                region = normalize_region(clean_text(row.get("Region")))
+                weight_from = to_float(row.get("Weight From Kg"))
+                weight_to = to_float(row.get("Weight To Kg"))
+                rate = to_float(row.get("Rate Per Quintal"))
+                if not region or weight_from is None or weight_to is None or rate is None:
+                    continue
+                tariffs.append(
+                    MacspedWeightBandTariff(
+                        region=region,
+                        weight_from_kg=weight_from,
+                        weight_to_kg=weight_to,
+                        rate_per_quintal=round(rate, 4),
+                    )
+                )
+        return cls(tariffs) if tariffs else None
+
+    @staticmethod
+    def billable_weight(taxable_weight_kg: float) -> float:
+        """Approximate Macsped's own rounding table ("scalare 74" up to 500 kg,
+        then steps of 100 kg beyond): minimum taxable weight is 100 kg (1
+        quintale); above 100 kg, round up to the next 100 kg step. Macsped's
+        exact scalare 74 breakpoints between 100 and 500 kg were not supplied,
+        so this uses the same simplified ceil-to-100kg approximation already
+        used for BRT beyond 100 kg.
+        """
+        if taxable_weight_kg <= 100:
+            return 100.0
+        return float(math.ceil(taxable_weight_kg / 100) * 100)
+
+    def calculate(
+        self,
+        province: str,
+        weight_kg: Any,
+        volume_m3: Any = None,
+    ) -> PassiveRateResult | None:
+        province_code = clean_text(province).upper()
+        region = PROVINCE_TO_REGION.get(province_code)
+        taxable = brt_taxable_weight(weight_kg, volume_m3)
+        if region is None or taxable is None:
+            return None
+        taxable_weight, actual_weight, volume, volumetric_weight = taxable
+
+        rules = self.by_region.get(region)
+        if not rules:
+            return None
+
+        billable_weight = self.billable_weight(taxable_weight)
+        for rule in rules:
+            if rule.weight_from_kg <= billable_weight <= rule.weight_to_kg:
+                quintals = billable_weight / 100
+                cost = round(quintals * rule.rate_per_quintal, 2)
+
+                weight_parts: list[str] = []
+                if actual_weight is not None:
+                    weight_parts.append(f"peso reale {actual_weight:.3f} kg")
+                if volume is not None and volumetric_weight is not None:
+                    weight_parts.append(
+                        f"peso volumetrico {volumetric_weight:.3f} kg ({volume:.3f} m3 x {BRT_VOLUMETRIC_KG_PER_M3:.0f})"
+                    )
+                weight_parts.append(f"peso tassabile {taxable_weight:.3f} kg")
+                if billable_weight != taxable_weight:
+                    weight_parts.append(f"arrotondato MACSPED a {billable_weight:.0f} kg")
+                weight_label = ", ".join(weight_parts)
+
+                band_label = (
+                    f"oltre {rule.weight_from_kg:.0f} kg"
+                    if rule.weight_to_kg >= 99999
+                    else f"{rule.weight_from_kg:.2f}-{rule.weight_to_kg:.0f} kg"
+                )
+                label = (
+                    f"MACSPED {region}: {quintals:.0f} q.li x EUR {rule.rate_per_quintal:.2f}; "
+                    f"fascia {band_label}; {weight_label}"
+                )
+                return PassiveRateResult(
+                    carrier="MACSPED",
+                    cost=cost,
+                    taxable_weight_kg=billable_weight,
+                    tariff_label=label,
+                    base_cost=cost,
+                    extra_cost=0,
+                    extras=[],
+                )
+        return None
+
+
 def best_passive_results(results: list[PassiveRateResult]) -> list[PassiveRateResult]:
     best_by_carrier: dict[str, PassiveRateResult] = {}
     for result in results:
@@ -1494,6 +1629,7 @@ def apply_tariffs_to_shipments(
     active_card = ActiveRateCard.from_excel(active_rates_path) if active_rates_path else None
     brt_card = BrtPassiveRateCard.from_pdf(brt_passive_pdf_path) if brt_passive_pdf_path else None
     carrier_rate_card = CarrierPalletRateCard.from_csv(default_carrier_tariffs_path())
+    macsped_card = MacspedPassiveRateCard.from_csv(default_macsped_tariffs_path())
     brt_extra_flags = load_brt_extra_flags(brt_extra_flags_path)
     gdo_registry = load_gdo_customer_registry(gdo_customers_path)
     fuel_settings = load_fuel_settings(fuel_settings_path)
@@ -1564,6 +1700,7 @@ def apply_tariffs_to_shipments(
         recommendation_results: list[PassiveRateResult] = []
         is_groupage_brt = clean_text(row.get("Tipo Servizio")) == "Groupage - BRT LTL"
         use_brt = selected_carrier == "BRT" or (is_groupage_brt and selected_carrier in {"", "BRT"})
+        use_macsped = is_groupage_brt and selected_carrier in {"", "MACSPED"}
         if not is_groupage_brt:
             if brt_card:
                 brt_recommendation = brt_card.calculate(
@@ -1584,6 +1721,31 @@ def apply_tariffs_to_shipments(
                     )
                 )
             set_best_carrier_fields(row, recommendation_results)
+        else:
+            # Groupage LTL: Macsped is only ever compared here against BRT.
+            # Macsped's direct shipments are priced separately at a dedicated
+            # rate and are handled outside this grid entirely (see use_macsped).
+            if brt_card:
+                brt_recommendation = brt_card.calculate(
+                    province,
+                    row.get("Grand Total Shipment Ftp Wgt Kg"),
+                    shipment_row=row,
+                    extra_flags=brt_extra_flags.get(shipment, {}),
+                    volume_m3=row.get("Grand Total Shipment Ftp Vol m3"),
+                    passive_fuel_rate=passive_fuel_rate,
+                )
+                if brt_recommendation:
+                    recommendation_results.append(brt_recommendation)
+            if macsped_card:
+                macsped_recommendation = macsped_card.calculate(
+                    province,
+                    row.get("Grand Total Shipment Ftp Wgt Kg"),
+                    volume_m3=row.get("Grand Total Shipment Ftp Vol m3"),
+                )
+                if macsped_recommendation:
+                    recommendation_results.append(macsped_recommendation)
+            if recommendation_results:
+                set_best_carrier_fields(row, recommendation_results)
 
         if brt_card and use_brt:
             brt_result = brt_card.calculate(
@@ -1596,6 +1758,15 @@ def apply_tariffs_to_shipments(
             )
             if brt_result:
                 passive_results.append(brt_result)
+
+        if macsped_card and use_macsped:
+            macsped_result = macsped_card.calculate(
+                province,
+                row.get("Grand Total Shipment Ftp Wgt Kg"),
+                volume_m3=row.get("Grand Total Shipment Ftp Vol m3"),
+            )
+            if macsped_result:
+                passive_results.append(macsped_result)
 
         if carrier_rate_card and selected_carrier and selected_carrier != "BRT":
             carrier_result = carrier_rate_card.calculate(

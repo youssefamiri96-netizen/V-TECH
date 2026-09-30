@@ -181,6 +181,8 @@ L'anagrafica tariffari vettori e in `data/carrier_tariffs.csv`. Per ora contiene
 - 1-8 pallet;
 - 9-15 pallet.
 
+Per il groupage LTL e disponibile anche il vettore `MACSPED`, tariffario in `data/macsped_tariffs.csv`: passiva a quintale (100 kg) per regione e fascia di peso (fino a 100 kg, 100,1/500, 500,1/2.000, oltre 2.000), con minimo tassabile 100 kg. Per le spedizioni con `Tipo Servizio` = `Groupage - BRT LTL` il programma confronta automaticamente BRT e Macsped e sceglie il passivo piu economico, compilando anche `Miglior Vettore`/`Secondo Vettore`. Macsped copre solo le regioni presenti nel tariffario; dove non e presente resta valido solo BRT. Le tariffe dirette di Macsped (FTL) sono a prezzo dedicato e non sono gestite dal programma: se assegni manualmente `MACSPED` a una spedizione diretta, la spedizione resta in attesa tariffa, esattamente come per un vettore senza passiva caricata.
+
 L'anagrafica generale clienti e in `data/customer_registry.csv`: contiene codice, ship-to, indirizzo, responsabile scarico, mail, telefono e shipping information. Il programma cerca automaticamente cliente e indirizzo della spedizione in questa anagrafica e aggiunge nelle `Note` il blocco `[CONTATTI MAGAZZINO]` con i contatti utili per prenotazione/scarico, senza duplicarlo ai reimport successivi.
 
 Quando saranno disponibili le passive degli altri vettori, si potranno aggiungere nel motore `tariff_engine.py` e il programma compilera anche secondo e terzo vettore piu convenienti.
