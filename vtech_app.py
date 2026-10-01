@@ -3234,16 +3234,23 @@ def apply_billing_group_fills(sheet, groups: list[tuple[int, int, PatternFill]])
                 cell.fill = fill
 
 
+MACSPED_CARRIER_ALIASES = {"MACSPED", "MACSPEED"}
+
+
 def passive_billing_carrier_label(row: dict[str, Any], carrier: str) -> str:
     """Etichetta vettore usata per raggruppare il file 'passivo vettori' in
     righe/fogli separati. Macsped fa sia groupage (tariffario Macsped, calcolato
     dal programma) sia dirette FTL (tariffa spot, passivo inserito a mano):
     mescolarle nello stesso foglio confronterebbe prezzi non comparabili, quindi
     vengono etichettate ed esportate come due vettori distinti nel file.
+
+    MACSPEED (doppia E) e' incluso perche' alcune spedizioni dirette sono
+    state assegnate a mano con quel refuso: senza normalizzarlo finirebbero
+    su un terzo foglio a parte invece che in "MACSPED FTL".
     """
-    if carrier == "MACSPED":
+    if carrier in MACSPED_CARRIER_ALIASES:
         is_groupage = clean_text(row.get("Tipo Servizio")) == "Groupage - BRT LTL"
-        return f"{carrier} Groupage" if is_groupage else f"{carrier} FTL"
+        return "MACSPED Groupage" if is_groupage else "MACSPED FTL"
     return carrier
 
 
