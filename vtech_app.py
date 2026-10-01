@@ -1022,15 +1022,19 @@ def save_monthly_fuel_settings(month: str, active: Any, passive: Any) -> dict[st
 def ensure_brt_extra_flags_template(shipments: list[dict[str, Any]]) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     existing: dict[str, dict[str, str]] = {}
+    changed = False
     if BRT_EXTRA_FLAGS_PATH.exists():
         with BRT_EXTRA_FLAGS_PATH.open("r", newline="", encoding="utf-8-sig") as file:
             reader = csv.DictReader(file)
+            if reader.fieldnames and set(reader.fieldnames) != set(BRT_EXTRA_FLAG_COLUMNS):
+                # Colonne nuove (es. gli extra Macsped) aggiunte dopo che il file
+                # esisteva gia': forza la riscrittura cosi' compaiono subito.
+                changed = True
             for row in reader:
                 shipment = clean_text(row.get("Shipment"))
                 if shipment:
                     existing[shipment] = {column: clean_text(row.get(column)) for column in BRT_EXTRA_FLAG_COLUMNS}
 
-    changed = False
     for row in shipments:
         shipment = clean_text(row.get("Shipment"))
         if shipment and shipment not in existing:

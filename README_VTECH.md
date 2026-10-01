@@ -185,6 +185,24 @@ L'anagrafica tariffari vettori e in `data/carrier_tariffs.csv`. Per ora contiene
 
 Per il groupage LTL e disponibile anche il vettore `MACSPED`, tariffario in `data/macsped_tariffs.csv`: passiva a quintale (100 kg) per regione e fascia di peso (fino a 100 kg, 100,1/500, 500,1/2.000, oltre 2.000), con minimo tassabile 100 kg. Per le spedizioni con `Tipo Servizio` = `Groupage - BRT LTL` il programma confronta automaticamente BRT e Macsped e sceglie il passivo piu economico, compilando anche `Miglior Vettore`/`Secondo Vettore`. Macsped copre solo le regioni presenti nel tariffario; dove non e presente resta valido solo BRT. Le tariffe dirette di Macsped (FTL) sono a prezzo dedicato e non sono gestite dal programma: se assegni manualmente `MACSPED` a una spedizione diretta, la spedizione resta in attesa tariffa, esattamente come per un vettore senza passiva caricata.
 
+Extra automatici sul passivo Macsped (nessuna spunta richiesta): fuel surcharge (stessa percentuale mensile impostata in `Fatturazione` per il passivo), ETS 5% sulle sole spedizioni Sicilia, consegne Amazon +35,00€/spedizione, consegne supermercati/GDO (quando non Amazon) +15,00€/spedizione. ZTL per Macsped e invece compreso in tariffa, quindi non genera nessun extra (a differenza di BRT).
+
+Gli altri extra Macsped si attivano spuntando `SI` nelle colonne dedicate di `data/brt_extra_flags.csv` (lo stesso file degli extra BRT, con le colonne aggiuntive elencate sotto: viene aggiornato in automatico al prossimo import se mancano):
+
+- `Sponda Idraulica`: 20,00 €/spedizione;
+- `Facchinaggio`: 6,00 €/q.le;
+- `Consegna Ai Piani`: 10,00 €/q.le;
+- `Consegna Tassativa`: +50% del nolo, minimo 30,00 € (non si applica se la spedizione e gia' GDO);
+- `Mancato Ritiro`: 10,00 €/q.le;
+- `Preavviso Telefonico`: 2,00 €/spedizione;
+- `Porto Assegnato`: 2,00 €/q.le, minimo 2,00 €;
+- `Contrassegno Valore` (stessa colonna di BRT, importo da incassare): 2% con minimo 6,00 € e massimo 100,00 €;
+- `Giacenza Dossier` (stessa colonna di BRT): 7,00 € fisso;
+- `Riconsegna Giacenza` (stessa colonna di BRT): 70% del nolo;
+- `Reso Al Mittente`: 100% del nolo.
+
+Non sono stati implementati, perche' il tariffario Macsped non indica un importo fisso o perche' sono condizioni contrattuali non legate alla singola spedizione: isole minori (al costo), prenotazione su portale (al costo), rivalutazione ISTAT annuale, attese carico/scarico e sosta oltre franchigia (nessun campo con le ore effettive), sosta e custodia giornaliera oltre i 5 giorni di franchigia (nessun campo con i giorni), gestione EPAL (non prevista da Macsped), termini di pagamento e validita tariffa.
+
 L'anagrafica generale clienti e in `data/customer_registry.csv`: contiene codice, ship-to, indirizzo, responsabile scarico, mail, telefono e shipping information. Il programma cerca automaticamente cliente e indirizzo della spedizione in questa anagrafica e aggiunge nelle `Note` il blocco `[CONTATTI MAGAZZINO]` con i contatti utili per prenotazione/scarico, senza duplicarlo ai reimport successivi.
 
 Quando saranno disponibili le passive degli altri vettori, si potranno aggiungere nel motore `tariff_engine.py` e il programma compilera anche secondo e terzo vettore piu convenienti.

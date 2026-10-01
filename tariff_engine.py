@@ -177,6 +177,15 @@ BRT_EXTRA_FLAG_COLUMNS = [
     "Bancali Rendere",
     "Giacenza Dossier",
     "Riconsegna Giacenza",
+    # Colonne usate solo per gli extra passivi Macsped (vedi MacspedPassiveRateCard.calculate):
+    "Sponda Idraulica",
+    "Facchinaggio",
+    "Consegna Ai Piani",
+    "Consegna Tassativa",
+    "Mancato Ritiro",
+    "Preavviso Telefonico",
+    "Porto Assegnato",
+    "Reso Al Mittente",
 ]
 
 TRUE_VALUES = {"1", "SI", "S", "YES", "Y", "TRUE", "X"}
@@ -1343,8 +1352,13 @@ class MacspedPassiveRateCard:
         self,
         province: str,
         weight_kg: Any,
+        shipment_row: dict[str, Any] | None = None,
+        extra_flags: dict[str, Any] | None = None,
         volume_m3: Any = None,
+        passive_fuel_rate: float = DEFAULT_PASSIVE_FUEL_RATE,
     ) -> PassiveRateResult | None:
+        if volume_m3 is None and shipment_row is not None:
+            volume_m3 = shipment_row.get("Grand Total Shipment Ftp Vol m3")
         province_code = clean_text(province).upper()
         region = PROVINCE_TO_REGION.get(province_code)
         taxable = brt_taxable_weight(weight_kg, volume_m3)
@@ -1357,42 +1371,112 @@ class MacspedPassiveRateCard:
             return None
 
         billable_weight = self.billable_weight(taxable_weight)
-        for rule in rules:
-            if rule.weight_from_kg <= billable_weight <= rule.weight_to_kg:
-                quintals = billable_weight / 100
-                cost = round(quintals * rule.rate_per_quintal, 2)
+        rule = next(
+            (item for item in rules if item.weight_from_kg <= billable_weight <= item.weight_to_kg),
+            None,
+        )
+        if rule is None:
+            return None
 
-                weight_parts: list[str] = []
-                if actual_weight is not None:
-                    weight_parts.append(f"peso reale {actual_weight:.3f} kg")
-                if volume is not None and volumetric_weight is not None:
-                    weight_parts.append(
-                        f"peso volumetrico {volumetric_weight:.3f} kg ({volume:.3f} m3 x {BRT_VOLUMETRIC_KG_PER_M3:.0f})"
-                    )
-                weight_parts.append(f"peso tassabile {taxable_weight:.3f} kg")
-                if billable_weight != taxable_weight:
-                    weight_parts.append(f"arrotondato MACSPED a {billable_weight:.0f} kg")
-                weight_label = ", ".join(weight_parts)
+        quintals = billable_weight / 100
+        base_cost = round(quintals * rule.rate_per_quintal, 2)
 
-                band_label = (
-                    f"oltre {rule.weight_from_kg:.0f} kg"
-                    if rule.weight_to_kg >= 99999
-                    else f"{rule.weight_from_kg:.2f}-{rule.weight_to_kg:.0f} kg"
-                )
-                label = (
-                    f"MACSPED {region}: {quintals:.0f} q.li x EUR {rule.rate_per_quintal:.2f}; "
-                    f"fascia {band_label}; {weight_label}"
-                )
-                return PassiveRateResult(
-                    carrier="MACSPED",
-                    cost=cost,
-                    taxable_weight_kg=billable_weight,
-                    tariff_label=label,
-                    base_cost=cost,
-                    extra_cost=0,
-                    extras=[],
-                )
-        return None
+        weight_parts: list[str] = []
+        if actual_weight is not None:
+            weight_parts.append(f"peso reale {actual_weight:.3f} kg")
+        if volume is not None and volumetric_weight is not None:
+            weight_parts.append(
+                f"peso volumetrico {volumetric_weight:.3f} kg ({volume:.3f} m3 x {BRT_VOLUMETRIC_KG_PER_M3:.0f})"
+            )
+        weight_parts.append(f"peso tassabile {taxable_weight:.3f} kg")
+        if billable_weight != taxable_weight:
+            weight_parts.append(f"arrotondato MACSPED a {billable_weight:.0f} kg")
+        weight_label = ", ".join(weight_parts)
+
+        band_label = (
+            f"oltre {rule.weight_from_kg:.0f} kg"
+            if rule.weight_to_kg >= 99999
+            else f"{rule.weight_from_kg:.2f}-{rule.weight_to_kg:.0f} kg"
+        )
+        base_label = (
+            f"MACSPED {region}: {quintals:.0f} q.li x EUR {rule.rate_per_quintal:.2f}; "
+            f"fascia {band_label}; {weight_label}"
+        )
+
+        flags = extra_flags or {}
+        extras: list[tuple[str, float]] = []
+        amazon = is_amazon_customer(shipment_row)
+        gdo_flagged = flag_enabled(shipment_row, flags, "Supermercati GDO")
+
+        # Extra automatici (nessuna spunta manuale richiesta)
+        if passive_fuel_rate > 0:
+            extras.append(
+                (f"Fuel surcharge passivo {format_percent(passive_fuel_rate)}", capped(base_cost * passive_fuel_rate))
+            )
+
+        if region == "SICILIA":
+            extras.append(("ETS Sicilia 5%", capped(base_cost * 0.05)))
+
+        if amazon:
+            extras.append(("Consegne piattaforme Amazon", 35.00))
+        elif gdo_flagged:
+            extras.append(("GDO consegna D60", 15.00))
+
+        # Extra da condizioni accessorie Macsped, attivabili a spedizione tramite
+        # data/brt_extra_flags.csv (il file resta condiviso con BRT: le colonne
+        # sotto sono usate solo quando lo shipment viene passivato su Macsped).
+        # ZTL non compare qui perche' per Macsped e' "compreso in tariffa".
+        if flag_enabled(shipment_row, flags, "Sponda Idraulica"):
+            extras.append(("Sponda idraulica", 20.00))
+
+        if flag_enabled(shipment_row, flags, "Facchinaggio"):
+            extras.append(("Facchinaggio", capped(6.00 * quintals)))
+
+        if flag_enabled(shipment_row, flags, "Consegna Ai Piani"):
+            extras.append(("Consegna ai piani", capped(10.00 * quintals)))
+
+        if flag_enabled(shipment_row, flags, "Localita Disagiata"):
+            extras.append(("Localita disagiata", capped(5.00 * quintals)))
+
+        if flag_enabled(shipment_row, flags, "Fuori Misura"):
+            extras.append(("Merce lunga fuori misura (+200%)", capped(base_cost * 2.00)))
+
+        if flag_enabled(shipment_row, flags, "Consegna Tassativa") and not gdo_flagged:
+            extras.append(("Consegna tassativa", capped(base_cost * 0.50, minimum=30.00)))
+
+        if flag_enabled(shipment_row, flags, "Mancato Ritiro"):
+            extras.append(("Mancato ritiro", capped(10.00 * quintals)))
+
+        if flag_enabled(shipment_row, flags, "Preavviso Telefonico"):
+            extras.append(("Preavviso telefonico", 2.00))
+
+        if flag_enabled(shipment_row, flags, "Porto Assegnato"):
+            extras.append(("Porto assegnato/triangolazione", capped(2.00 * quintals, minimum=2.00)))
+
+        cod_value = flag_number(shipment_row, flags, "Contrassegno Valore")
+        if cod_value and cod_value > 0:
+            extras.append(("Contrassegno", capped(cod_value * 0.02, minimum=6.00, maximum=100.00)))
+
+        if flag_enabled(shipment_row, flags, "Giacenza Dossier"):
+            extras.append(("Dossier giacenza", 7.00))
+
+        if flag_enabled(shipment_row, flags, "Riconsegna Giacenza"):
+            extras.append(("Riconsegna", capped(base_cost * 0.70)))
+
+        if flag_enabled(shipment_row, flags, "Reso Al Mittente"):
+            extras.append(("Reso al mittente", capped(base_cost * 1.00)))
+
+        extra_cost = round(sum(amount for _, amount in extras), 2)
+        extras_label = ", ".join(f"{name} EUR {amount:.2f}" for name, amount in extras)
+        return PassiveRateResult(
+            carrier="MACSPED",
+            cost=round(base_cost + extra_cost, 2),
+            taxable_weight_kg=billable_weight,
+            tariff_label=f"{base_label}; extra: {extras_label}" if extras_label else base_label,
+            base_cost=round(base_cost, 2),
+            extra_cost=extra_cost,
+            extras=[f"{name}: EUR {amount:.2f}" for name, amount in extras],
+        )
 
 
 def best_passive_results(results: list[PassiveRateResult]) -> list[PassiveRateResult]:
@@ -1740,7 +1824,10 @@ def apply_tariffs_to_shipments(
                 macsped_recommendation = macsped_card.calculate(
                     province,
                     row.get("Grand Total Shipment Ftp Wgt Kg"),
+                    shipment_row=row,
+                    extra_flags=brt_extra_flags.get(shipment, {}),
                     volume_m3=row.get("Grand Total Shipment Ftp Vol m3"),
+                    passive_fuel_rate=passive_fuel_rate,
                 )
                 if macsped_recommendation:
                     recommendation_results.append(macsped_recommendation)
@@ -1763,7 +1850,10 @@ def apply_tariffs_to_shipments(
             macsped_result = macsped_card.calculate(
                 province,
                 row.get("Grand Total Shipment Ftp Wgt Kg"),
+                shipment_row=row,
+                extra_flags=brt_extra_flags.get(shipment, {}),
                 volume_m3=row.get("Grand Total Shipment Ftp Vol m3"),
+                passive_fuel_rate=passive_fuel_rate,
             )
             if macsped_result:
                 passive_results.append(macsped_result)
