@@ -2898,10 +2898,12 @@ function warehousePalletsSummaryMessage(summary) {
   const unchanged = summary.unchanged?.length || 0;
   const notFound = summary.not_found?.length || 0;
   const ambiguous = summary.ambiguous?.length || 0;
+  const incomplete = summary.incomplete?.length || 0;
   const parts = [`${updated} bancali aggiornati`];
   if (unchanged) parts.push(`${unchanged} gia' corretti`);
   if (notFound) parts.push(`${notFound} ordini non trovati`);
   if (ambiguous) parts.push(`${ambiguous} ordini ambigui`);
+  if (incomplete) parts.push(`${incomplete} spedizioni multi-ordine incomplete (controllare a mano)`);
   return `Bancali magazzino: ${parts.join(", ")}.`;
 }
 

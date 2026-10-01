@@ -2735,28 +2735,36 @@ def remove_order_from_shipment(
     return row
 
 
-def load_shipments_by_order(db_path: Path = DB_PATH) -> dict[str, list[str]]:
-    """Indice inverso Order -> shipment: per ogni ordine (normalizzato),
-    elenca gli shipment che lo contengono tra i loro 'Orders'. Uno shipment
-    puo' raggruppare piu' ordini, quindi normalmente la lista ha un solo
-    elemento; piu' di uno segnala un ordine ambiguo da non toccare in automatico.
+def load_shipment_order_maps(db_path: Path = DB_PATH) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Restituisce (shipment -> lista ordini normalizzati, ordine -> lista
+    shipment). Uno shipment puo' raggruppare piu' ordini (spedizioni
+    consolidate): la prima mappa serve a sapere TUTTI gli ordini di uno
+    shipment, cosi' il bancali va sommato e non sovrascritto con quello di un
+    solo ordine. Un ordine normalmente appartiene a un solo shipment: piu' di
+    uno nella seconda mappa segnala un caso ambiguo da non toccare in automatico.
     """
     init_db(db_path)
-    index: dict[str, list[str]] = {}
+    shipment_orders: dict[str, list[str]] = {}
+    order_shipments: dict[str, list[str]] = {}
     with sqlite3.connect(db_path) as conn:
         rows = conn.execute("SELECT shipment, orders_text FROM shipments").fetchall()
     for shipment, orders_text in rows:
         shipment = clean_text(shipment)
         if not shipment:
             continue
+        tokens: list[str] = []
         for token in re.split(r"[|,;/]+", clean_text(orders_text)):
             key = normalized_order_key(token)
-            if not key:
-                continue
-            bucket = index.setdefault(key, [])
+            if key and key not in tokens:
+                tokens.append(key)
+        if not tokens:
+            continue
+        shipment_orders[shipment] = tokens
+        for key in tokens:
+            bucket = order_shipments.setdefault(key, [])
             if shipment not in bucket:
                 bucket.append(shipment)
-    return index
+    return shipment_orders, order_shipments
 
 
 def import_warehouse_pallets(
@@ -2766,50 +2774,78 @@ def import_warehouse_pallets(
     db_path: Path = DB_PATH,
 ) -> dict[str, Any]:
     """Importa il file 'Monitoraggio prenotazioni carichi' del magazzino:
-    per ogni riga con un Order riconosciuto, riporta la colonna Bancali
-    (pallet reali caricati) come bancali manuali sulla spedizione
-    corrispondente, individuata tramite l'Order. Riusa la stessa logica di
-    set_manual_pallets per ricalcolare attivo/passivo/margine.
+    per ogni Order riconosciuto, riporta la colonna Bancali (pallet reali
+    caricati) come bancali manuali sulla spedizione corrispondente,
+    individuata tramite l'Order. Riusa la stessa logica di set_manual_pallets
+    per ricalcolare attivo/passivo/margine.
+
+    Quando uno shipment raggruppa piu' ordini (spedizione consolidata), il
+    bancali totale viene sommato solo se il file magazzino riporta TUTTI gli
+    ordini di quello shipment: altrimenti si rischierebbe di sovrascrivere il
+    totale con il pallet di un solo ordine, sballando drasticamente l'attiva.
+    In quel caso lo shipment finisce in "incomplete" e non viene toccato.
     """
     rows = load_warehouse_pallet_rows(path)
-    order_index = load_shipments_by_order(db_path)
+
+    pallets_by_order: dict[str, float] = {}
+    skipped_no_order = 0
+    skipped_no_pallets = 0
+    for source in rows:
+        order_key = normalized_order_key(source.get("Order"))
+        if not order_key:
+            skipped_no_order += 1
+            continue
+        pallets = to_float(source.get("Bancali"))
+        if pallets is None or pallets <= 0:
+            skipped_no_pallets += 1
+            continue
+        pallets_by_order[order_key] = pallets
+
+    shipment_orders, order_shipments = load_shipment_order_maps(db_path)
 
     updated: list[dict[str, Any]] = []
     unchanged: list[dict[str, Any]] = []
     not_found: list[dict[str, Any]] = []
     ambiguous: list[dict[str, Any]] = []
-    skipped_no_order = 0
-    skipped_no_pallets = 0
+    incomplete: list[dict[str, Any]] = []
+    processed_shipments: set[str] = set()
 
-    for source in rows:
-        order_raw = source.get("Order")
-        order_key = normalized_order_key(order_raw)
-        if not order_key:
-            skipped_no_order += 1
-            continue
-
-        pallets = to_float(source.get("Bancali"))
-        if pallets is None or pallets <= 0:
-            skipped_no_pallets += 1
-            continue
-
-        shipments = order_index.get(order_key, [])
+    for order_key, order_pallets in pallets_by_order.items():
+        shipments = order_shipments.get(order_key, [])
         if not shipments:
-            not_found.append({"order": clean_text(order_raw), "pallets": pallets})
+            not_found.append({"order": order_key, "pallets": order_pallets})
             continue
         if len(shipments) > 1:
-            ambiguous.append({"order": clean_text(order_raw), "pallets": pallets, "shipments": shipments})
+            ambiguous.append({"order": order_key, "pallets": order_pallets, "shipments": shipments})
             continue
 
         shipment = shipments[0]
+        if shipment in processed_shipments:
+            continue
+        processed_shipments.add(shipment)
+
+        all_orders = shipment_orders.get(shipment, [order_key])
+        if len(all_orders) > 1:
+            missing_orders = [order for order in all_orders if order not in pallets_by_order]
+            if missing_orders:
+                incomplete.append({
+                    "shipment": shipment,
+                    "orders": all_orders,
+                    "missing_orders": missing_orders,
+                })
+                continue
+            total_pallets = sum(pallets_by_order[order] for order in all_orders)
+        else:
+            total_pallets = order_pallets
+
         current_row = get_shipment_from_db(shipment, db_path)
         current_manual = to_float((current_row or {}).get("Pallet Manuali"))
-        if current_manual is not None and abs(current_manual - pallets) < 0.001:
-            unchanged.append({"order": clean_text(order_raw), "shipment": shipment, "pallets": pallets})
+        if current_manual is not None and abs(current_manual - total_pallets) < 0.001:
+            unchanged.append({"shipment": shipment, "orders": all_orders, "pallets": total_pallets})
             continue
 
-        set_manual_pallets(shipment, pallets, active_rates_path, brt_passive_path, db_path=db_path)
-        updated.append({"order": clean_text(order_raw), "shipment": shipment, "pallets": pallets})
+        set_manual_pallets(shipment, total_pallets, active_rates_path, brt_passive_path, db_path=db_path)
+        updated.append({"shipment": shipment, "orders": all_orders, "pallets": total_pallets})
 
     return {
         "rows": len(rows),
@@ -2817,6 +2853,7 @@ def import_warehouse_pallets(
         "unchanged": unchanged,
         "not_found": not_found,
         "ambiguous": ambiguous,
+        "incomplete": incomplete,
         "skipped_no_order": skipped_no_order,
         "skipped_no_pallets": skipped_no_pallets,
     }
