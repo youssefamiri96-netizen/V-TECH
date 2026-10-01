@@ -59,6 +59,7 @@ from vtech_app import (
     load_settings,
     load_shipments_from_db,
     import_warehouse_pallets,
+    export_multi_order_pallets_audit,
     mark_confirmed,
     mark_delivered,
     mark_departed,
@@ -161,6 +162,7 @@ FULL_POST_PATHS = {
     "/api/planned-export",
     "/api/scan-downloads",
     "/api/action",
+    "/api/warehouse-pallets-audit-export",
 }
 UPLOAD_SETTINGS_KEYS = {
     "report": "vtech_path",
@@ -1699,6 +1701,9 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/passive-export":
                 self._handle_passive_export(body, user)
                 return
+            if parsed.path == "/api/warehouse-pallets-audit-export":
+                self._handle_warehouse_pallets_audit_export(user)
+                return
             if parsed.path == "/api/planned-export":
                 self._handle_planned_export(body, user)
                 return
@@ -1904,6 +1909,15 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             "path": str(output_path),
             "downloadUrl": download_url_for_path(output_path),
             "data": grouped_shipments(user),
+        })
+
+    def _handle_warehouse_pallets_audit_export(self, user: dict[str, str]) -> None:
+        output_path = export_multi_order_pallets_audit()
+        self._send_json({
+            "ok": True,
+            "file": output_path.name,
+            "path": str(output_path),
+            "downloadUrl": download_url_for_path(output_path),
         })
 
     def _handle_planned_export(self, body: dict[str, Any], user: dict[str, str]) -> None:

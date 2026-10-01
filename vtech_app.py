@@ -2859,6 +2859,108 @@ def import_warehouse_pallets(
     }
 
 
+def audit_multi_order_manual_pallets(db_path: Path = DB_PATH) -> list[dict[str, Any]]:
+    """Elenca gli shipment multi-ordine con bancali manuali impostato, per
+    stanare i casi lasciati sbagliati dal bug dell'import bancali magazzino
+    (corretto, ma solo per i prossimi import): prima della correzione il
+    manuale veniva impostato con il pallet di un solo ordine invece della
+    somma di tutti gli ordini dello shipment.
+
+    Confronta il valore attuale con 'Pallet Originali' (il totale del
+    report prima di qualsiasi override manuale): un manuale piu' basso
+    dell'originale su uno shipment multi-ordine e' il sintomo tipico del
+    bug, ma puo' anche essere una correzione manuale legittima fatta da un
+    operatore con "Bancali manuali": va sempre controllato, non viene
+    corretto in automatico da questa funzione.
+    """
+    init_db(db_path)
+    results: list[dict[str, Any]] = []
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT shipment, orders_text, manual_pallets, payload_json FROM shipments WHERE manual_pallets IS NOT NULL"
+        ).fetchall()
+    for shipment, orders_text, manual_pallets, payload_json in rows:
+        orders = [token.strip() for token in re.split(r"[|,;/]+", clean_text(orders_text)) if token.strip()]
+        if len(orders) <= 1:
+            continue
+        try:
+            payload = json.loads(payload_json or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        original = to_float(payload.get("Pallet Originali"))
+        manual_value = to_float(manual_pallets)
+        suspicious = original is not None and manual_value is not None and manual_value < original
+        results.append({
+            "shipment": clean_text(shipment),
+            "orders": orders,
+            "cliente": clean_text(payload.get("Route to Customer")),
+            "provincia": clean_text(payload.get("Provincia")),
+            "manual_pallets": manual_value,
+            "pallet_originali": original,
+            "suspicious": suspicious,
+        })
+    results.sort(key=lambda item: (not item["suspicious"], item["shipment"]))
+    return results
+
+
+def export_multi_order_pallets_audit(
+    db_path: Path = DB_PATH,
+    downloads_dir: Path = DOWNLOADS_DIR,
+) -> Path:
+    results = audit_multi_order_manual_pallets(db_path)
+    if not results:
+        raise ValueError("Nessuna spedizione multi-ordine con bancali manuali trovata.")
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Controllo bancali"
+    headers = [
+        "Shipment",
+        "Ordini",
+        "Cliente",
+        "Provincia",
+        "Bancali manuali attuali",
+        "Pallet originali report",
+        "Da controllare",
+    ]
+    sheet.append(headers)
+    for item in results:
+        sheet.append([
+            item["shipment"],
+            " | ".join(item["orders"]),
+            item["cliente"],
+            item["provincia"],
+            item["manual_pallets"],
+            item["pallet_originali"],
+            "SI" if item["suspicious"] else "",
+        ])
+
+    header_fill = PatternFill("solid", fgColor="0F2742")
+    for cell in sheet[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = header_fill
+    suspicious_fill = PatternFill("solid", fgColor="FEE2E2")
+    for row_index, item in enumerate(results, start=2):
+        if item["suspicious"]:
+            for cell in sheet[row_index]:
+                cell.fill = suspicious_fill
+    for column_cells in sheet.columns:
+        max_len = max((len(str(cell.value)) for cell in column_cells if cell.value is not None), default=10)
+        sheet.column_dimensions[column_cells[0].column_letter].width = min(40, max(10, max_len + 2))
+
+    table = Table(displayName="ControlloBancali", ref=f"A1:{get_column_letter(sheet.max_column)}{sheet.max_row}")
+    table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True)
+    sheet.add_table(table)
+
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_path = downloads_dir / f"VTech_controllo_bancali_multiordine_{timestamp}.xlsx"
+    workbook.save(output_path)
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise OSError(f"Excel controllo bancali non creato correttamente: {output_path}")
+    return output_path
+
+
 def set_unload_date(
     shipment: str,
     unload_date: Any,

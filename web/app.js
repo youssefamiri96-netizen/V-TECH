@@ -207,6 +207,7 @@ const els = {
   activeUploadBtn: document.querySelector("#activeUploadBtn"),
   brtUploadBtn: document.querySelector("#brtUploadBtn"),
   warehousePalletsUploadBtn: document.querySelector("#warehousePalletsUploadBtn"),
+  warehousePalletsAuditBtn: document.querySelector("#warehousePalletsAuditBtn"),
   deletedBox: document.querySelector("#deletedBox"),
   deletedCount: document.querySelector("#deletedCount"),
   currentUser: document.querySelector("#currentUser"),
@@ -3194,6 +3195,19 @@ els.clearDepartedFilters.addEventListener("click", () => {
       showToast(error.message);
     }
   });
+});
+
+els.warehousePalletsAuditBtn?.addEventListener("click", async () => {
+  try {
+    showToast("Controllo spedizioni multi-ordine...");
+    const payload = await api("/api/warehouse-pallets-audit-export", { method: "POST", body: JSON.stringify({}) });
+    showToast(`Excel di controllo creato in Download: ${payload.file}. Clicca qui per aprirlo.`, {
+      openPath: payload.path,
+      downloadUrl: payload.downloadUrl || "",
+    });
+  } catch (error) {
+    showToast(error.message);
+  }
 });
 
 els.content.addEventListener("change", (event) => {
