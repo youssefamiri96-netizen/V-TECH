@@ -178,7 +178,7 @@ BRT_EXTRA_FLAG_COLUMNS = [
     "Giacenza Dossier",
     "Riconsegna Giacenza",
     # Colonne usate solo per gli extra passivi Macsped (vedi MacspedPassiveRateCard.calculate):
-    "Sponda Idraulica",
+    # Sponda Idraulica NON e' qui: e' automatica, stessa regola della sponda attiva BRT groupage.
     "Facchinaggio",
     "Consegna Ai Piani",
     "Consegna Tassativa",
@@ -1422,13 +1422,18 @@ class MacspedPassiveRateCard:
         elif gdo_flagged:
             extras.append(("GDO consegna D60", 15.00))
 
+        # Sponda idraulica: stessa regola gia' usata per l'attiva BRT groupage
+        # (requires_active_tail_lift) - tutte le groupage, esclusi Amazon ed
+        # esclusi i GDO a meno che non abbiano "Attiva Sponda" (anagrafica GDO
+        # con nota SPONDA). Nessuna spunta manuale da fare.
+        sponda_flag = clean_text((shipment_row or {}).get("Attiva Sponda")).upper() in TRUE_VALUES
+        if not amazon and (not gdo_flagged or sponda_flag):
+            extras.append(("Sponda idraulica", 20.00))
+
         # Extra da condizioni accessorie Macsped, attivabili a spedizione tramite
         # data/brt_extra_flags.csv (il file resta condiviso con BRT: le colonne
         # sotto sono usate solo quando lo shipment viene passivato su Macsped).
         # ZTL non compare qui perche' per Macsped e' "compreso in tariffa".
-        if flag_enabled(shipment_row, flags, "Sponda Idraulica"):
-            extras.append(("Sponda idraulica", 20.00))
-
         if flag_enabled(shipment_row, flags, "Facchinaggio"):
             extras.append(("Facchinaggio", capped(6.00 * quintals)))
 
@@ -1441,7 +1446,11 @@ class MacspedPassiveRateCard:
         if flag_enabled(shipment_row, flags, "Fuori Misura"):
             extras.append(("Merce lunga fuori misura (+200%)", capped(base_cost * 2.00)))
 
-        if flag_enabled(shipment_row, flags, "Consegna Tassativa") and not gdo_flagged:
+        # Consegna tassativa: automatica quando lo shipment e' gia' marcato DKV
+        # (Data Consegna Tassativa valorizzata dal flusso "Scegli DKL o DKV" gia'
+        # in uso), oppure forzabile a mano con la spunta per i casi non DKV.
+        tassativa_auto = bool(clean_text((shipment_row or {}).get("Data Consegna Tassativa")))
+        if (tassativa_auto or flag_enabled(shipment_row, flags, "Consegna Tassativa")) and not gdo_flagged:
             extras.append(("Consegna tassativa", capped(base_cost * 0.50, minimum=30.00)))
 
         if flag_enabled(shipment_row, flags, "Mancato Ritiro"):

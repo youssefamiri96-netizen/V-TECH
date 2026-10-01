@@ -187,12 +187,17 @@ Per il groupage LTL e disponibile anche il vettore `MACSPED`, tariffario in `dat
 
 Extra automatici sul passivo Macsped (nessuna spunta richiesta): fuel surcharge (stessa percentuale mensile impostata in `Fatturazione` per il passivo), ETS 5% sulle sole spedizioni Sicilia, consegne Amazon +35,00€/spedizione, consegne supermercati/GDO (quando non Amazon) +15,00€/spedizione. ZTL per Macsped e invece compreso in tariffa, quindi non genera nessun extra (a differenza di BRT).
 
+Altri due extra sono automatici perche' riusano una condizione gia' tracciata altrove nel programma, con il prezzo Macsped al posto di quello BRT:
+
+- `Sponda idraulica` (20,00 €/spedizione): stessa regola della sponda attiva BRT groupage, quindi si applica a tutte le spedizioni groupage tranne Amazon, ed esclusi i clienti GDO a meno che non abbiano `SPONDA` nelle note di `data/gdo_customers.csv` (`Attiva Sponda` = SI);
+- `Consegna tassativa` (+50% del nolo, minimo 30,00 €): scatta da sola quando la spedizione e' gia' marcata DKV (`Data Consegna Tassativa` valorizzata, dal flusso "Scegli DKL o DKV" che usi gia' per l'SLA), esclusa se la spedizione e' GDO; resta anche una spunta manuale in `data/brt_extra_flags.csv` per i casi senza DKV.
+
 Gli altri extra Macsped si attivano spuntando `SI` nelle colonne dedicate di `data/brt_extra_flags.csv` (lo stesso file degli extra BRT, con le colonne aggiuntive elencate sotto: viene aggiornato in automatico al prossimo import se mancano):
 
-- `Sponda Idraulica`: 20,00 €/spedizione;
 - `Facchinaggio`: 6,00 €/q.le;
 - `Consegna Ai Piani`: 10,00 €/q.le;
-- `Consegna Tassativa`: +50% del nolo, minimo 30,00 € (non si applica se la spedizione e gia' GDO);
+- `Localita Disagiata` (stessa colonna di BRT): 5,00 €/q.le;
+- `Fuori Misura` (stessa colonna di BRT, merce lunga): +200% del nolo;
 - `Mancato Ritiro`: 10,00 €/q.le;
 - `Preavviso Telefonico`: 2,00 €/spedizione;
 - `Porto Assegnato`: 2,00 €/q.le, minimo 2,00 €;
