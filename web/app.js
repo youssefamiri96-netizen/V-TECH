@@ -1067,11 +1067,13 @@ function parseDateValue(value) {
 }
 
 // Stessa regola del backend: la competenza segue la data di partenza, quella
-// reale se c'e' gia', altrimenti quella pianificata. Le date del report restano
-// come ripiego per le spedizioni senza nessuna partenza.
+// reale se c'e' gia', altrimenti quella pianificata (Data Pianifica se gia'
+// marcata, altrimenti la partenza della wave assegnata dal report). Le altre
+// date del report restano come ripiego per le spedizioni senza nessuna wave.
 function billingDate(row) {
   return parseDateValue(row.raw["Data Partenza"])
     || parseDateValue(row.raw["Data Pianifica"])
+    || parseDateValue(row.raw["Data Partenza Wave"])
     || parseDateValue(row.raw["Late Ship Date"])
     || parseDateValue(row.raw["Data Consegna"])
     || parseDateValue(row.raw["Data Consegna Tassativa"])

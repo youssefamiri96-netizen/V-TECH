@@ -627,12 +627,16 @@ def day_after_iso(value: Any | None = None) -> str:
     return (base_date + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
-# La competenza di attivo e passivo segue la data di partenza: quella reale se la
-# spedizione e' gia' partita, altrimenti quella pianificata. Le date del report
-# restano solo come ripiego per le righe che non hanno ancora nessuna partenza.
+# La competenza di attivo e passivo segue la data di partenza: quella reale se
+# la spedizione e' gia' partita, altrimenti quella pianificata (Data Pianifica
+# se lo shipment e' gia' stato marcato Pianificata, altrimenti la partenza
+# della wave assegnata dal report, gia' nota anche prima di quel passaggio).
+# Le altre date del report restano solo come ripiego per le righe senza
+# nessuna wave riconosciuta e non ancora pianificate.
 BILLING_DATE_COLUMNS = (
     "Data Partenza",
     "Data Pianifica",
+    "Data Partenza Wave",
     "Late Ship Date",
     "Data Consegna",
     "Data Consegna Tassativa",
