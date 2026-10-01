@@ -58,6 +58,7 @@ from vtech_app import (
     load_monthly_fuel_settings,
     load_settings,
     load_shipments_from_db,
+    import_warehouse_pallets,
     mark_confirmed,
     mark_delivered,
     mark_departed,
@@ -170,6 +171,7 @@ UPLOAD_EXTENSIONS = {
     "report": {".xlsx", ".xlsm", ".xls"},
     "active": {".xlsx", ".xlsm", ".xls"},
     "brt": {".pdf"},
+    "warehouse_pallets": {".xlsx", ".xlsm", ".xls"},
 }
 
 
@@ -1836,7 +1838,7 @@ class VTechWebHandler(BaseHTTPRequestHandler):
 
     def _handle_upload_file(self, body: dict[str, Any], user: dict[str, str]) -> None:
         kind = clean_text(body.get("kind")).lower()
-        if kind not in UPLOAD_SETTINGS_KEYS:
+        if kind not in UPLOAD_EXTENSIONS:
             raise ValueError("Tipo file non valido.")
 
         filename = safe_upload_filename(body.get("filename"), f"{kind}_upload")
@@ -1852,14 +1854,19 @@ class VTechWebHandler(BaseHTTPRequestHandler):
         target.write_bytes(content)
 
         settings = load_settings()
-        settings[UPLOAD_SETTINGS_KEYS[kind]] = str(target)
-        save_settings(settings)
+        if kind in UPLOAD_SETTINGS_KEYS:
+            settings[UPLOAD_SETTINGS_KEYS[kind]] = str(target)
+            save_settings(settings)
 
         summary: dict[str, Any] | None = None
         if kind == "report":
             active_path = Path(settings.get("active_rates_path", "")) if settings.get("active_rates_path") else None
             brt_path = Path(settings.get("brt_passive_path", "")) if settings.get("brt_passive_path") else None
             _detail_rows, _shipment_rows, summary = run_import(target, active_path, brt_path, save_db=True)
+        elif kind == "warehouse_pallets":
+            active_path = Path(settings.get("active_rates_path", "")) if settings.get("active_rates_path") else None
+            brt_path = Path(settings.get("brt_passive_path", "")) if settings.get("brt_passive_path") else None
+            summary = import_warehouse_pallets(target, active_path, brt_path)
 
         self._send_json({
             "ok": True,

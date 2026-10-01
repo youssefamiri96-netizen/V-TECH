@@ -202,9 +202,11 @@ const els = {
   reportUpload: document.querySelector("#reportUpload"),
   activeUpload: document.querySelector("#activeUpload"),
   brtUpload: document.querySelector("#brtUpload"),
+  warehousePalletsUpload: document.querySelector("#warehousePalletsUpload"),
   reportUploadBtn: document.querySelector("#reportUploadBtn"),
   activeUploadBtn: document.querySelector("#activeUploadBtn"),
   brtUploadBtn: document.querySelector("#brtUploadBtn"),
+  warehousePalletsUploadBtn: document.querySelector("#warehousePalletsUploadBtn"),
   deletedBox: document.querySelector("#deletedBox"),
   deletedCount: document.querySelector("#deletedCount"),
   currentUser: document.querySelector("#currentUser"),
@@ -2890,12 +2892,26 @@ async function copyMailToClipboard(html, text) {
   return "text";
 }
 
+function warehousePalletsSummaryMessage(summary) {
+  if (!summary) return "Bancali magazzino caricati.";
+  const updated = summary.updated?.length || 0;
+  const unchanged = summary.unchanged?.length || 0;
+  const notFound = summary.not_found?.length || 0;
+  const ambiguous = summary.ambiguous?.length || 0;
+  const parts = [`${updated} bancali aggiornati`];
+  if (unchanged) parts.push(`${unchanged} gia' corretti`);
+  if (notFound) parts.push(`${notFound} ordini non trovati`);
+  if (ambiguous) parts.push(`${ambiguous} ordini ambigui`);
+  return `Bancali magazzino: ${parts.join(", ")}.`;
+}
+
 async function uploadOperationalFile(kind, file) {
   if (!file) return;
   const labels = {
     report: "Report V-Tech",
     active: "tariffe attive",
     brt: "passiva BRT",
+    warehouse_pallets: "bancali magazzino",
   };
   showToast(`Carico ${labels[kind] || "file"}...`);
   const payload = await api("/api/upload-file", {
@@ -2907,7 +2923,13 @@ async function uploadOperationalFile(kind, file) {
     }),
   });
   applyData(payload.data, { renderPage: true, keepSelection: false });
-  showToast(kind === "report" ? "Report caricato e importato." : `${labels[kind]} caricata. Calcoli aggiornati.`);
+  if (kind === "report") {
+    showToast("Report caricato e importato.");
+  } else if (kind === "warehouse_pallets") {
+    showToast(warehousePalletsSummaryMessage(payload.summary));
+  } else {
+    showToast(`${labels[kind]} caricata. Calcoli aggiornati.`);
+  }
 }
 
 function clampActionDockPosition(left, top) {
@@ -3156,6 +3178,7 @@ els.clearDepartedFilters.addEventListener("click", () => {
   [els.reportUploadBtn, els.reportUpload, "report"],
   [els.activeUploadBtn, els.activeUpload, "active"],
   [els.brtUploadBtn, els.brtUpload, "brt"],
+  [els.warehousePalletsUploadBtn, els.warehousePalletsUpload, "warehouse_pallets"],
 ].forEach(([button, input, kind]) => {
   if (!button || !input) return;
   button.addEventListener("click", () => input.click());

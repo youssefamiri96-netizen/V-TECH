@@ -44,6 +44,7 @@ from vtech_importer import (
     classify_unloading_booking,
     clean_text,
     extract_vtech_rows,
+    load_warehouse_pallet_rows,
     parse_wave_departure_date,
     serialize,
     write_csv,
@@ -2728,6 +2729,93 @@ def remove_order_from_shipment(
             (exclusion_key, stamp, exclusion_payload),
         )
     return row
+
+
+def load_shipments_by_order(db_path: Path = DB_PATH) -> dict[str, list[str]]:
+    """Indice inverso Order -> shipment: per ogni ordine (normalizzato),
+    elenca gli shipment che lo contengono tra i loro 'Orders'. Uno shipment
+    puo' raggruppare piu' ordini, quindi normalmente la lista ha un solo
+    elemento; piu' di uno segnala un ordine ambiguo da non toccare in automatico.
+    """
+    init_db(db_path)
+    index: dict[str, list[str]] = {}
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute("SELECT shipment, orders_text FROM shipments").fetchall()
+    for shipment, orders_text in rows:
+        shipment = clean_text(shipment)
+        if not shipment:
+            continue
+        for token in re.split(r"[|,;/]+", clean_text(orders_text)):
+            key = normalized_order_key(token)
+            if not key:
+                continue
+            bucket = index.setdefault(key, [])
+            if shipment not in bucket:
+                bucket.append(shipment)
+    return index
+
+
+def import_warehouse_pallets(
+    path: Path,
+    active_rates_path: Path | None,
+    brt_passive_path: Path | None,
+    db_path: Path = DB_PATH,
+) -> dict[str, Any]:
+    """Importa il file 'Monitoraggio prenotazioni carichi' del magazzino:
+    per ogni riga con un Order riconosciuto, riporta la colonna Bancali
+    (pallet reali caricati) come bancali manuali sulla spedizione
+    corrispondente, individuata tramite l'Order. Riusa la stessa logica di
+    set_manual_pallets per ricalcolare attivo/passivo/margine.
+    """
+    rows = load_warehouse_pallet_rows(path)
+    order_index = load_shipments_by_order(db_path)
+
+    updated: list[dict[str, Any]] = []
+    unchanged: list[dict[str, Any]] = []
+    not_found: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
+    skipped_no_order = 0
+    skipped_no_pallets = 0
+
+    for source in rows:
+        order_raw = source.get("Order")
+        order_key = normalized_order_key(order_raw)
+        if not order_key:
+            skipped_no_order += 1
+            continue
+
+        pallets = to_float(source.get("Bancali"))
+        if pallets is None or pallets <= 0:
+            skipped_no_pallets += 1
+            continue
+
+        shipments = order_index.get(order_key, [])
+        if not shipments:
+            not_found.append({"order": clean_text(order_raw), "pallets": pallets})
+            continue
+        if len(shipments) > 1:
+            ambiguous.append({"order": clean_text(order_raw), "pallets": pallets, "shipments": shipments})
+            continue
+
+        shipment = shipments[0]
+        current_row = get_shipment_from_db(shipment, db_path)
+        current_manual = to_float((current_row or {}).get("Pallet Manuali"))
+        if current_manual is not None and abs(current_manual - pallets) < 0.001:
+            unchanged.append({"order": clean_text(order_raw), "shipment": shipment, "pallets": pallets})
+            continue
+
+        set_manual_pallets(shipment, pallets, active_rates_path, brt_passive_path, db_path=db_path)
+        updated.append({"order": clean_text(order_raw), "shipment": shipment, "pallets": pallets})
+
+    return {
+        "rows": len(rows),
+        "updated": updated,
+        "unchanged": unchanged,
+        "not_found": not_found,
+        "ambiguous": ambiguous,
+        "skipped_no_order": skipped_no_order,
+        "skipped_no_pallets": skipped_no_pallets,
+    }
 
 
 def set_unload_date(

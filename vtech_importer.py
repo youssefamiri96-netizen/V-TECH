@@ -327,6 +327,49 @@ def load_rows(path: Path, sheet_name: str) -> list[dict[str, Any]]:
     return rows
 
 
+WAREHOUSE_PALLET_HEADER_ROW = 2
+WAREHOUSE_PALLET_REQUIRED_COLUMNS = {"Order", "Bancali"}
+
+
+def load_warehouse_pallet_rows(path: Path) -> list[dict[str, Any]]:
+    """Legge il file 'Monitoraggio prenotazioni carichi' compilato dal
+    magazzino: intestazioni sulla riga 2 (la riga 1 e' un titolo), con le
+    colonne 'Order' e 'Bancali' (pallet reali caricati per spedizione).
+    """
+    wb = load_workbook(path, read_only=True, data_only=True)
+    ws = wb.worksheets[0]
+    header_values = [cell.value for cell in ws[WAREHOUSE_PALLET_HEADER_ROW]]
+    column_indexes: list[tuple[int, str]] = []
+    seen: dict[str, int] = defaultdict(int)
+
+    for idx, header in enumerate(header_values):
+        if is_blank(header):
+            continue
+        name = clean_text(header)
+        seen[name] += 1
+        if seen[name] > 1:
+            name = f"{name} ({seen[name]})"
+        column_indexes.append((idx, name))
+
+    found_columns = {name for _, name in column_indexes}
+    missing = WAREHOUSE_PALLET_REQUIRED_COLUMNS - found_columns
+    if missing:
+        wb.close()
+        raise ValueError(
+            "Il file magazzino non contiene le colonne attese "
+            f"{', '.join(sorted(missing))} sulla riga {WAREHOUSE_PALLET_HEADER_ROW}."
+        )
+
+    rows: list[dict[str, Any]] = []
+    for values in ws.iter_rows(min_row=WAREHOUSE_PALLET_HEADER_ROW + 1, values_only=True):
+        row = {name: values[idx] if idx < len(values) else None for idx, name in column_indexes}
+        if any(not is_blank(value) for value in row.values()):
+            rows.append(row)
+
+    wb.close()
+    return rows
+
+
 def index_first(rows: list[dict[str, Any]], key_columns: tuple[str, ...]) -> dict[tuple[str, ...], dict[str, Any]]:
     indexed: dict[tuple[str, ...], dict[str, Any]] = {}
     for row in rows:
