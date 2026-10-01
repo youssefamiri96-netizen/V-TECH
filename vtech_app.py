@@ -141,6 +141,7 @@ def register_custom_carrier(name: Any) -> str:
         )
     return carrier
 DATE_ONLY_COLUMNS = {
+    "Dispatch Date",
     "Late Ship Date",
     "Early Delivery Date",
     "Early Delivery Date Originale",
@@ -409,6 +410,7 @@ DISPLAY_COLUMNS = [
     "Wave",
     "Data Pianifica",
     "Data Partenza Wave",
+    "Dispatch Date",
     "Attiva Urgente",
     "Prenotazione Scarico",
     "Note Text",
@@ -445,6 +447,7 @@ COLUMN_TITLES = {
     "Wave": "Wave",
     "Data Pianifica": "Partenza pianificata",
     "Data Partenza Wave": "Partenza wave",
+    "Dispatch Date": "Dispatch date (master)",
     "Vettore Wave": "Vettore wave",
     "Tipo Wave": "Tipo wave",
     "Attiva Urgente": "Urgente",
@@ -510,6 +513,7 @@ COLUMN_WIDTHS = {
     "Wave": 180,
     "Data Pianifica": 120,
     "Data Partenza Wave": 120,
+    "Dispatch Date": 140,
     "Attiva Urgente": 80,
     "Prenotazione Scarico": 145,
     "Note Text": 190,
@@ -627,13 +631,17 @@ def day_after_iso(value: Any | None = None) -> str:
     return (base_date + timedelta(days=1)).strftime("%Y-%m-%d")
 
 
-# La competenza di attivo e passivo segue la data di partenza: quella reale se
-# la spedizione e' gia' partita, altrimenti quella pianificata (Data Pianifica
-# se lo shipment e' gia' stato marcato Pianificata, altrimenti la partenza
-# della wave assegnata dal report, gia' nota anche prima di quel passaggio).
-# Le altre date del report restano solo come ripiego per le righe senza
-# nessuna wave riconosciuta e non ancora pianificate.
+# La competenza di attivo e passivo segue la data di partenza. Fonte primaria:
+# Dispatch Date del file master (foglio Outbound Shipments), la data esatta di
+# partenza registrata dal magazzino - quando c'e' e' sempre quella giusta.
+# Finche' non e' valorizzata (spedizione non ancora partita secondo il
+# magazzino) si scende sulle date gestite dal programma: Data Partenza
+# (confermata a mano qui dentro), poi Data Pianifica (se gia' marcata
+# Pianificata) e la partenza della wave assegnata dal report (nota anche prima
+# di quel passaggio). Le altre date del report restano solo come ripiego per
+# le righe senza nessuna wave riconosciuta e non ancora pianificate.
 BILLING_DATE_COLUMNS = (
+    "Dispatch Date",
     "Data Partenza",
     "Data Pianifica",
     "Data Partenza Wave",

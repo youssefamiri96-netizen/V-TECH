@@ -38,6 +38,7 @@ REQUIRED_COLUMNS = [
     "Theoretical Pallets",
     "Grand Total Shipment Ftp CS Wgt Kg",
     "Route to Customer",
+    "Dispatch Date",
 ]
 
 SHIPMENT_COLUMNS = [
@@ -66,6 +67,7 @@ SHIPMENT_COLUMNS = [
     "Cliente GDO",
     "Route To Address",
     "Provincia",
+    "Dispatch Date",
     "Late Ship Date",
     "Early Delivery Date",
     "Early Delivery Date Originale",
@@ -109,6 +111,7 @@ SHIPMENT_COLUMNS = [
 ]
 
 DATE_ONLY_COLUMNS = {
+    "Dispatch Date",
     "Late Ship Date",
     "Early Delivery Date",
     "Early Delivery Date Originale",
@@ -647,6 +650,7 @@ def extract_vtech_rows(path: Path) -> list[dict[str, Any]]:
             set_if_present(row, "Late Ship Date", shipment_row.get("Late Shipping Date"))
             set_if_present(row, "Early Delivery Date", shipment_row.get("Early Delivery Date"))
             set_if_present(row, "Route to Customer", shipment_row.get("Route to Customer"))
+            set_if_present(row, "Dispatch Date", shipment_row.get("Dispatch Date"))
 
         transport_row = transport_by_ordlin.get((ordlin,), {})
         if transport_row:
@@ -717,6 +721,7 @@ def build_shipment_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "Cliente GDO": "",
                 "Route To Address": address,
                 "Provincia": extract_province(address),
+                "Dispatch Date": first_present(group, "Dispatch Date"),
                 "Late Ship Date": first_present(group, "Late Ship Date"),
                 "Early Delivery Date": first_present(group, "Early Delivery Date"),
                 "Righe Articolo": len(group),
