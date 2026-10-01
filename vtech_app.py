@@ -3234,6 +3234,19 @@ def apply_billing_group_fills(sheet, groups: list[tuple[int, int, PatternFill]])
                 cell.fill = fill
 
 
+def passive_billing_carrier_label(row: dict[str, Any], carrier: str) -> str:
+    """Etichetta vettore usata per raggruppare il file 'passivo vettori' in
+    righe/fogli separati. Macsped fa sia groupage (tariffario Macsped, calcolato
+    dal programma) sia dirette FTL (tariffa spot, passivo inserito a mano):
+    mescolarle nello stesso foglio confronterebbe prezzi non comparabili, quindi
+    vengono etichettate ed esportate come due vettori distinti nel file.
+    """
+    if carrier == "MACSPED":
+        is_groupage = clean_text(row.get("Tipo Servizio")) == "Groupage - BRT LTL"
+        return f"{carrier} Groupage" if is_groupage else f"{carrier} FTL"
+    return carrier
+
+
 def export_passive_billing_by_carrier(
     month_key: str | None = None,
     db_path: Path = DB_PATH,
@@ -3265,6 +3278,7 @@ def export_passive_billing_by_carrier(
     by_carrier: dict[str, list[tuple[date, dict[str, Any]]]] = {}
     for ref_date, row in selected:
         carrier = clean_text(row.get("Carrier Scelto")) or clean_text(row.get("Carrier Originale")) or "SENZA VETTORE"
+        carrier = passive_billing_carrier_label(row, carrier)
         by_carrier.setdefault(carrier, []).append((ref_date, row))
 
     workbook = Workbook()
