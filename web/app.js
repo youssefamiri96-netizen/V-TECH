@@ -203,11 +203,13 @@ const els = {
   activeUpload: document.querySelector("#activeUpload"),
   brtUpload: document.querySelector("#brtUpload"),
   warehousePalletsUpload: document.querySelector("#warehousePalletsUpload"),
+  carrierTariffsUpload: document.querySelector("#carrierTariffsUpload"),
   reportUploadBtn: document.querySelector("#reportUploadBtn"),
   activeUploadBtn: document.querySelector("#activeUploadBtn"),
   brtUploadBtn: document.querySelector("#brtUploadBtn"),
   warehousePalletsUploadBtn: document.querySelector("#warehousePalletsUploadBtn"),
   warehousePalletsAuditBtn: document.querySelector("#warehousePalletsAuditBtn"),
+  carrierTariffsUploadBtn: document.querySelector("#carrierTariffsUploadBtn"),
   deletedBox: document.querySelector("#deletedBox"),
   deletedCount: document.querySelector("#deletedCount"),
   currentUser: document.querySelector("#currentUser"),
@@ -2918,6 +2920,7 @@ async function uploadOperationalFile(kind, file) {
     active: "tariffe attive",
     brt: "passiva BRT",
     warehouse_pallets: "bancali magazzino",
+    carrier_tariffs: "tariffe vettori",
   };
   showToast(`Carico ${labels[kind] || "file"}...`);
   const payload = await api("/api/upload-file", {
@@ -2933,6 +2936,9 @@ async function uploadOperationalFile(kind, file) {
     showToast("Report caricato e importato.");
   } else if (kind === "warehouse_pallets") {
     showToast(warehousePalletsSummaryMessage(payload.summary));
+  } else if (kind === "carrier_tariffs") {
+    const carriers = payload.summary?.carriers || [];
+    showToast(`Tariffe vettori aggiornate${carriers.length ? ": " + carriers.join(", ") : ""}.`);
   } else {
     showToast(`${labels[kind]} caricata. Calcoli aggiornati.`);
   }
@@ -3185,6 +3191,7 @@ els.clearDepartedFilters.addEventListener("click", () => {
   [els.activeUploadBtn, els.activeUpload, "active"],
   [els.brtUploadBtn, els.brtUpload, "brt"],
   [els.warehousePalletsUploadBtn, els.warehousePalletsUpload, "warehouse_pallets"],
+  [els.carrierTariffsUploadBtn, els.carrierTariffsUpload, "carrier_tariffs"],
 ].forEach(([button, input, kind]) => {
   if (!button || !input) return;
   button.addEventListener("click", () => input.click());

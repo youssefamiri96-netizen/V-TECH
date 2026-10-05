@@ -174,6 +174,7 @@ UPLOAD_EXTENSIONS = {
     "active": {".xlsx", ".xlsm", ".xls"},
     "brt": {".pdf"},
     "warehouse_pallets": {".xlsx", ".xlsm", ".xls"},
+    "carrier_tariffs": {".csv"},
 }
 
 
@@ -1872,6 +1873,18 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             active_path = Path(settings.get("active_rates_path", "")) if settings.get("active_rates_path") else None
             brt_path = Path(settings.get("brt_passive_path", "")) if settings.get("brt_passive_path") else None
             summary = import_warehouse_pallets(target, active_path, brt_path)
+        elif kind == "carrier_tariffs":
+            required_columns = {"Carrier", "Region", "Pallets From", "Pallets To", "Rate Per Pallet"}
+            with target.open("r", newline="", encoding="utf-8-sig") as file:
+                reader = csv.DictReader(file)
+                fieldnames = set(reader.fieldnames or [])
+                missing = required_columns - fieldnames
+                if missing:
+                    raise ValueError(f"Colonne mancanti nel CSV tariffe vettori: {', '.join(sorted(missing))}")
+                carriers = sorted({clean_text(row.get("Carrier")).upper() for row in reader if clean_text(row.get("Carrier"))})
+            canonical_path = DATA_DIR / "carrier_tariffs.csv"
+            canonical_path.write_bytes(content)
+            summary = {"carriers": carriers}
 
         self._send_json({
             "ok": True,

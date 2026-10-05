@@ -183,7 +183,9 @@ Nella pagina `Fatturazione` puoi scaricare:
 L'anagrafica tariffari vettori e in `data/carrier_tariffs.csv`. Per ora contiene Grendi con tariffa passiva a pallet per regione e fascia pallet. Quando selezioni `GRENDI` come vettore, il programma calcola automaticamente la passiva usando provincia di consegna, pallet arrotondati per eccesso e fascia tariffaria:
 
 - 1-8 pallet;
-- 9-15 pallet.
+- 9 pallet e oltre (nessun limite massimo: la tariffa della fascia 9-15 vale anche per spedizioni piu' grandi, finche' non arriva una tariffa dedicata per fasce piu' alte).
+
+Il pulsante `Carica tariffe vettori (CSV)`, accanto agli altri upload, sostituisce `data/carrier_tariffs.csv` con un file nuovo: usalo quando cambia una tariffa Grendi (o si aggiunge un altro vettore a pallet) senza dover aspettare un deploy. Il CSV deve avere le colonne `Carrier, Region, Pallets From, Pallets To, Rate Per Pallet, Currency, Active`; per una fascia senza limite massimo, metti un numero molto alto in `Pallets To` (es. `999999`).
 
 Per il groupage LTL e disponibile anche il vettore `MACSPED`, tariffario in `data/macsped_tariffs.csv`: passiva a quintale (100 kg) per regione e fascia di peso (fino a 100 kg, 100,1/500, 500,1/2.000, oltre 2.000), con minimo tassabile 100 kg. Per le spedizioni con `Tipo Servizio` = `Groupage - BRT LTL` il programma confronta automaticamente BRT e Macsped e sceglie il passivo piu economico, compilando anche `Miglior Vettore`/`Secondo Vettore`. Macsped copre solo le regioni presenti nel tariffario; dove non e presente resta valido solo BRT. Le tariffe dirette di Macsped (FTL) sono a prezzo dedicato e non sono gestite dal programma: se assegni manualmente `MACSPED` a una spedizione diretta, la spedizione resta in attesa tariffa, esattamente come per un vettore senza passiva caricata.
 

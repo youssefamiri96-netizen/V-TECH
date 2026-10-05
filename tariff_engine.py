@@ -1253,9 +1253,14 @@ class CarrierPalletRateCard:
         for rule in rules:
             if rule.pallet_from <= billed_pallets <= rule.pallet_to:
                 cost = round(billed_pallets * rule.rate_per_pallet, 2)
+                band_label = (
+                    f"oltre {rule.pallet_from - 1} pallet"
+                    if rule.pallet_to >= 99999
+                    else f"{rule.pallet_from}-{rule.pallet_to} pallet"
+                )
                 label = (
                     f"{carrier_code} {region}: {billed_pallets} pallet x EUR {rule.rate_per_pallet:.2f}; "
-                    f"fascia {rule.pallet_from}-{rule.pallet_to} pallet"
+                    f"fascia {band_label}"
                 )
                 return PassiveRateResult(
                     carrier=carrier_code,
