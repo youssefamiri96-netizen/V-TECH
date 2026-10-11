@@ -86,6 +86,18 @@ from vtech_app import (
     to_float,
     update_planned_date,
 )
+from vtech_otd import (
+    add_booked_destination,
+    delete_booked_destination,
+    delete_lead_time,
+    export_otd_report,
+    import_lead_times,
+    import_otm_events,
+    init_otd_db,
+    otd_payload,
+    set_lead_time,
+    set_override,
+)
 from vtech_claims import (
     add_claim_attachment,
     attachment_file,
@@ -163,6 +175,7 @@ FULL_POST_PATHS = {
     "/api/scan-downloads",
     "/api/action",
     "/api/warehouse-pallets-audit-export",
+    "/api/otd",
 }
 UPLOAD_SETTINGS_KEYS = {
     "report": "vtech_path",
@@ -1617,6 +1630,13 @@ class VTechWebHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"ok": True, "users": list_auth_users_payload(), "roles": USER_ROLES})
             return
+        if path == "/api/otd":
+            if not has_full_access(user):
+                self._forbidden()
+                return
+            init_otd_db()
+            self._send_json({"ok": True, **otd_payload()})
+            return
         if path == "/api/claims":
             if not has_claims_access(user):
                 self._forbidden()
@@ -1726,6 +1746,9 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/claims":
                 self._handle_claims(body, user)
                 return
+            if parsed.path == "/api/otd":
+                self._handle_otd(body, user)
+                return
             if parsed.path == "/api/users":
                 self._handle_users(body, user)
                 return
@@ -1770,6 +1793,49 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             raise ValueError("Azione claim non riconosciuta.")
 
         self._send_json({"ok": True, "claim": claim, **claims_payload()})
+
+    def _handle_otd(self, body: dict[str, Any], user: dict[str, str]) -> None:
+        init_otd_db()
+        action = clean_text(body.get("action")).lower()
+        author = clean_text(user.get("displayName") or user.get("username"))
+        result: dict[str, Any] = {}
+
+        if action == "import":
+            filename = safe_upload_filename(body.get("filename"), "otm_eventi.xlsx")
+            if Path(filename).suffix.lower() not in {".xlsx", ".xlsm"}:
+                raise ValueError("Per l'OTD serve il file Excel (.xlsx) del report OTM.")
+            result["summary"] = import_otm_events(decode_upload_base64(body.get("contentBase64")), filename)
+        elif action == "override":
+            result["updated"] = set_override(
+                body.get("orderIds") or [],
+                outcome=body.get("outcome"),
+                booked=body.get("booked"),
+                note=body.get("note"),
+                author=author,
+            )
+        elif action == "lead_time_set":
+            set_lead_time(body.get("carrier"), body.get("province"), body.get("days"))
+        elif action == "lead_time_delete":
+            delete_lead_time(int(body.get("id") or 0))
+        elif action == "lead_times_import":
+            filename = safe_upload_filename(body.get("filename"), "lead_time.xlsx")
+            if Path(filename).suffix.lower() not in {".xlsx", ".xlsm", ".csv"}:
+                raise ValueError("Formato non valido: usa .xlsx o .csv.")
+            result["summary"] = import_lead_times(decode_upload_base64(body.get("contentBase64")), filename)
+        elif action == "booked_add":
+            add_booked_destination(body.get("pattern"))
+        elif action == "booked_delete":
+            delete_booked_destination(int(body.get("id") or 0))
+        elif action == "export":
+            output_path = export_otd_report(month=clean_text(body.get("month")), carrier=clean_text(body.get("carrier")))
+            result.update({
+                "file": output_path.name,
+                "path": str(output_path),
+                "downloadUrl": download_url_for_path(output_path),
+            })
+        else:
+            raise ValueError("Azione OTD non riconosciuta.")
+        self._send_json({"ok": True, **result, **otd_payload()})
 
     def _handle_login(self, body: dict[str, Any]) -> None:
         username = clean_text(body.get("username"))
