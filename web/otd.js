@@ -264,7 +264,7 @@
       "    <div>",
       '      <span class="eyebrow">On Time Delivery</span>',
       '      <h2 id="otdHeadTitle">OTD</h2>',
-      "      <p>Carica il report OTM <strong>Order Status Code &amp; Reason Code</strong>: l'esito si calcola in giorni lavorativi (esclusi sabato, domenica e festivita' italiane) confrontando la consegna con il lead time. Le prenotate sono OK in automatico quando risultano consegnate; se non lo sono ancora, non entrano nel conteggio. L'esito si puo' forzare a mano.</p>",
+      "      <p>Carica il report OTM <strong>Order Status Code &amp; Reason Code</strong>: l'esito si calcola in giorni lavorativi (esclusi sabato, domenica e festivita' italiane) confrontando la consegna con il lead time. Le prenotate (BKL) sono OK in automatico quando risultano consegnate; se non lo sono ancora, non entrano nel conteggio. Le tassative (BKV) devono rispettare la data di scarico inserita dal cliente, di solito la Early Delivery Date. L'esito si puo' forzare a mano.</p>",
       "    </div>",
       '    <div class="otd-actions">',
       '      <button class="primary" data-otd="import">Carica report OTM</button>',
@@ -444,7 +444,7 @@
         '<td><input type="checkbox" data-otd-check="' + esc(row.id) + '"' + (otd.selected[row.id] ? " checked" : "") + " /></td>" +
         "<td>" + esc(row.id) + "</td><td>" + esc(row.carrier) + '</td><td class="wrap">' + esc(row.dest) + "</td><td>" + esc(row.prov) + "</td>" +
         "<td>" + esc(shortDate(row.shipped)) + "</td><td>" + esc(shortDate(row.delivered)) + "</td>" +
-        '<td class="r">' + (row.days === null || row.days === undefined ? "-" : row.days) + '</td><td class="r" title="' + esc((row.leadSource || "nessuna regola") + (row.service ? " - " + row.service + " (" + row.serviceSource + ")" : "")) + '">' + (row.lead === null || row.lead === undefined ? "-" : row.lead) + "</td><td>" + esc(row.service) + "</td>" +
+        '<td class="r">' + (row.days === null || row.days === undefined ? "-" : row.days) + '</td><td class="r" title="' + esc(row.target ? "Data di scarico tassativa (" + row.freight + ")" : (row.leadSource || "nessuna regola") + (row.service ? " - " + row.service + " (" + row.serviceSource + ")" : "")) + '">' + (row.target ? esc(shortDate(row.target)) : (row.lead === null || row.lead === undefined ? "-" : row.lead)) + "</td><td>" + esc(row.service) + "</td><td>" + esc(row.rule) + "</td>" +
         "<td>" + (row.booked ? "SI (" + esc(row.bookedSource) + ")" : "NO") + "</td>" +
         '<td><span class="otd-chip ' + tone + '">' + esc(row.outcome) + "</span>" + (row.forced ? '<span class="otd-forced" title="Esito forzato a mano">&#9998;</span>' : "") +
         (row.noStatus10 ? ' <span class="otd-chip wait" title="Senza esito da oltre 10 giorni lavorativi">&gt;10 gg</span>' : "") + "</td>" +
@@ -455,8 +455,8 @@
       rows.length > ROW_LIMIT ? '<div class="otd-note">Mostro i primi ' + ROW_LIMIT + " ordini: usa i filtri per restringere. L'export Excel contiene tutto.</div>" : "",
       '<table class="otd-table"><thead><tr><th><input type="checkbox" data-otd-checkall' + (allChecked ? " checked" : "") + ' /></th>',
       "<th>Ordine</th><th>Vettore</th><th>Destinatario</th><th>Prov</th><th>Partenza</th><th>Consegna</th>",
-      '<th class="r">Giorni lav.</th><th class="r">Lead time</th><th>Servizio</th><th>Prenotata</th><th>Esito</th><th class="r">Ritardo</th><th>Note / motivi</th></tr></thead>',
-      "<tbody>" + (body || '<tr><td colspan="14" class="otd-note">Nessun ordine con questi filtri.</td></tr>') + "</tbody></table>",
+      '<th class="r">Giorni lav.</th><th class="r">Lead time / data</th><th>Servizio</th><th>Regola</th><th>Prenotata</th><th>Esito</th><th class="r">Ritardo</th><th>Note / motivi</th></tr></thead>',
+      "<tbody>" + (body || '<tr><td colspan="15" class="otd-note">Nessun ordine con questi filtri.</td></tr>') + "</tbody></table>",
     ].join("");
   }
 
