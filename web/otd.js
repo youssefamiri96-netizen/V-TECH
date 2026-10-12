@@ -26,6 +26,7 @@
     outcome: "",
     search: "",
     onlyAlert: false,
+    excludeBooked: false,
     selected: {},
     settingsOpen: false,
     busy: false,
@@ -120,6 +121,7 @@
       if (otd.carrier && row.carrier !== otd.carrier) return false;
       if (otd.outcome && row.outcome !== otd.outcome) return false;
       if (otd.onlyAlert && !row.noStatus10) return false;
+      if (otd.excludeBooked && row.booked) return false;
       if (!needle) return true;
       return [row.id, row.dn, row.ship, row.dest, row.city, row.prov, row.carrier, row.note].some(function (value) {
         return text(value).toLowerCase().indexOf(needle) !== -1;
@@ -281,6 +283,7 @@
       '    <select id="otdOutcome"></select>',
       '    <input type="search" id="otdSearch" placeholder="Cerca ordine, delivery note, destinatario, citta..." autocomplete="off" />',
       '    <label class="check"><input type="checkbox" id="otdAlert" /> Solo senza esito oltre 10 gg</label>',
+      '    <label class="check" title="Di default le prenotate contano come OK, come nel foglio Haleon"><input type="checkbox" id="otdExcludeBooked" /> Escludi le prenotate dai KPI</label>',
       "  </div>",
       '  <div class="otd-grid">',
       '    <div class="otd-card" id="otdMonths"></div>',
@@ -324,7 +327,7 @@
       kpi("Ritardo medio", num(s.avgDelay, 1) + " gg", "solo sui NO", "ko"),
       kpi("Senza esito", num(s.noStatus), "non ancora consegnati", "wait"),
       kpi("Senza esito > 10 gg", num(s.alerts), "non prenotate", "wait"),
-      kpi("Prenotate", num(s.booked), "OK in automatico"),
+      kpi("Prenotate", num(s.booked), otd.excludeBooked ? "escluse dai KPI" : "OK in automatico"),
     ].join("");
   }
 
@@ -358,6 +361,8 @@
     if (search && search !== document.activeElement) search.value = otd.search;
     var alertBox = document.querySelector("#otdAlert");
     if (alertBox) alertBox.checked = otd.onlyAlert;
+    var excludeBox = document.querySelector("#otdExcludeBooked");
+    if (excludeBox) excludeBox.checked = otd.excludeBooked;
   }
 
   function summaryRows(groups, labelFn) {
@@ -593,7 +598,7 @@
       otd.settingsOpen = !otd.settingsOpen;
       renderSettings();
     } else if (action === "export") {
-      run({ action: "export", month: otd.month, carrier: otd.carrier }, "Excel OTD generato.").then(function (result) {
+      run({ action: "export", month: otd.month, carrier: otd.carrier, excludeBooked: otd.excludeBooked }, "Excel OTD generato.").then(function (result) {
         if (result && result.downloadUrl && typeof triggerDownload === "function") triggerDownload(result.downloadUrl);
       });
     } else if (action === "clear-selection") {
@@ -648,6 +653,9 @@
       renderKpis(); renderMonths(); renderCarriers(); renderList();
     } else if (target.id === "otdAlert") {
       otd.onlyAlert = target.checked;
+      renderKpis(); renderMonths(); renderCarriers(); renderList();
+    } else if (target.id === "otdExcludeBooked") {
+      otd.excludeBooked = target.checked;
       renderKpis(); renderMonths(); renderCarriers(); renderList();
     }
   }

@@ -56,6 +56,7 @@ STATUS_POD = "3060"
 STATUS_APPOINTMENT = "2520"
 STATUS_NOT_DELIVERED = "76"
 STATUS_RETURN = "602"
+STATUS_DEPARTED = "609"
 STATUS_ORDER = {"609": 1, "610": 2, "2520": 3, "611": 4, "76": 5, "602": 5, "17": 6, "3060": 7}
 
 MONTH_NAMES = [
@@ -254,9 +255,9 @@ COLUMN_ALIASES = {
     "carrier": ["carrier", "vettore"],
     "customer": ["customer name", "customer", "cliente"],
     "dest_location": ["dest location", "destination location"],
-    "dest_city": ["dest city", "destination city"],
+    "dest_city": ["dest city", "destination city", "city"],
     "dest_province": ["dest province", "destination province"],
-    "dest_postal": ["dest postal code", "postal code"],
+    "dest_postal": ["dest postal code", "postal code", "cap zip code", "cap"],
     "weight": ["weight", "peso"],
     "volume": ["volume"],
     "status_code": ["status code"],
@@ -265,7 +266,7 @@ COLUMN_ALIASES = {
     "reason_desc": ["reason desc"],
     "shipped_date": ["shipped date", "data partenza"],
     "event_date": ["event date"],
-    "event_inserted": ["event inserted date"],
+    "event_inserted": ["event inserted date", "insert date"],
     "lead_time": ["lead time"],
 }
 
@@ -336,8 +337,15 @@ def _aggregate_orders(events: list[dict[str, Any]]) -> dict[str, dict[str, Any]]
             dates = [value for value in dates if value]
             return min(dates) if dates else None
 
+        # Partenza: colonna SHIPPED DATE se il report la ha, altrimenti l'evento
+        # "Departed KN warehouse" (609), altrimenti la prima data di inserimento.
         shipped_dates = [parse_date(item.get("shipped_date")) for item in items]
         shipped_dates = [value for value in shipped_dates if value]
+        if not shipped_dates and first_date(STATUS_DEPARTED):
+            shipped_dates = [first_date(STATUS_DEPARTED)]
+        if not shipped_dates:
+            shipped_dates = [parse_date(item.get("event_inserted")) for item in items]
+            shipped_dates = [value for value in shipped_dates if value]
         reasons = []
         for item in ordered:
             code = clean_text(item.get("reason_code"))
@@ -798,8 +806,11 @@ def export_otd_report(
     downloads_dir: Path = DOWNLOADS_DIR,
     month: str = "",
     carrier: str = "",
+    exclude_booked: bool = False,
 ) -> Path:
     rows = compute_rows(db_path)
+    if exclude_booked:
+        rows = [row for row in rows if not row["booked"]]
     month = clean_text(month)
     carrier = _norm_carrier(carrier)
     if month:
@@ -819,6 +830,8 @@ def export_otd_report(
         scope.append(_month_label(month))
     if carrier:
         scope.append(carrier)
+    if exclude_booked:
+        scope.append("prenotate escluse")
     sheet["A2"] = (" - ".join(scope) if scope else "Tutti i mesi, tutti i vettori") + f" - generato il {datetime.now():%d/%m/%Y %H:%M}"
     total = summarize(rows)
     headers = ["", "Ordini", "OK", "NO", "Senza esito", "Altri esiti", "% OTD", "Ritardo medio gg"]

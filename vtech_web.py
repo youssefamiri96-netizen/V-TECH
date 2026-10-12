@@ -1827,7 +1827,11 @@ class VTechWebHandler(BaseHTTPRequestHandler):
         elif action == "booked_delete":
             delete_booked_destination(int(body.get("id") or 0))
         elif action == "export":
-            output_path = export_otd_report(month=clean_text(body.get("month")), carrier=clean_text(body.get("carrier")))
+            output_path = export_otd_report(
+                month=clean_text(body.get("month")),
+                carrier=clean_text(body.get("carrier")),
+                exclude_booked=bool(body.get("excludeBooked")),
+            )
             result.update({
                 "file": output_path.name,
                 "path": str(output_path),
