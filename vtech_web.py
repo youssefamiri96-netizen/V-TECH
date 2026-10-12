@@ -91,6 +91,7 @@ from vtech_otd import (
     delete_booked_destination,
     delete_lead_time,
     export_otd_report,
+    import_contract_lead_times,
     import_lead_times,
     import_otm_events,
     init_otd_db,
@@ -1804,7 +1805,7 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             filename = safe_upload_filename(body.get("filename"), "otm_eventi.xlsx")
             if Path(filename).suffix.lower() not in {".xlsx", ".xlsm"}:
                 raise ValueError("Per l'OTD serve il file Excel (.xlsx) del report OTM.")
-            result["summary"] = import_otm_events(decode_upload_base64(body.get("contentBase64")), filename)
+            result["importSummary"] = import_otm_events(decode_upload_base64(body.get("contentBase64")), filename)
         elif action == "override":
             result["updated"] = set_override(
                 body.get("orderIds") or [],
@@ -1821,7 +1822,12 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             filename = safe_upload_filename(body.get("filename"), "lead_time.xlsx")
             if Path(filename).suffix.lower() not in {".xlsx", ".xlsm", ".csv"}:
                 raise ValueError("Formato non valido: usa .xlsx o .csv.")
-            result["summary"] = import_lead_times(decode_upload_base64(body.get("contentBase64")), filename)
+            result["importSummary"] = import_lead_times(decode_upload_base64(body.get("contentBase64")), filename)
+        elif action == "contract_import":
+            filename = safe_upload_filename(body.get("filename"), "rate_card.xlsx")
+            if Path(filename).suffix.lower() not in {".xlsx", ".xlsm"}:
+                raise ValueError("Per i lead time contrattuali serve la rate card Excel (.xlsx).")
+            result["importSummary"] = import_contract_lead_times(decode_upload_base64(body.get("contentBase64")))
         elif action == "booked_add":
             add_booked_destination(body.get("pattern"))
         elif action == "booked_delete":
@@ -1830,7 +1836,6 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             output_path = export_otd_report(
                 month=clean_text(body.get("month")),
                 carrier=clean_text(body.get("carrier")),
-                exclude_booked=bool(body.get("excludeBooked")),
             )
             result.update({
                 "file": output_path.name,

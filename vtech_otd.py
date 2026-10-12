@@ -34,7 +34,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from vtech_app import DB_PATH, DOWNLOADS_DIR, clean_text
+from vtech_app import DB_PATH, DOWNLOADS_DIR, SEED_DIR, clean_text
 
 OUTCOME_OK = "OK"
 OUTCOME_NO = "NO"
@@ -237,6 +237,12 @@ def init_otd_db(db_path: Path = DB_PATH) -> None:
                 province TEXT NOT NULL,
                 days INTEGER NOT NULL,
                 UNIQUE(carrier, province)
+            );
+            CREATE TABLE IF NOT EXISTS otd_contract_lead_times (
+                province TEXT PRIMARY KEY,
+                region TEXT,
+                groupage_days INTEGER,
+                direct_days INTEGER
             );
             CREATE TABLE IF NOT EXISTS otd_booked_destinations (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -520,6 +526,119 @@ def import_lead_times(content: bytes, filename: str, db_path: Path = DB_PATH) ->
     return {"saved": saved, "skipped": skipped}
 
 
+# ------------------------------------------------ lead time contrattuali
+
+SERVICE_GROUPAGE = "Groupage"
+SERVICE_DIRECT = "Diretto"
+GROUPAGE_SERVICE_TYPE = "Groupage - BRT LTL"
+# Senza il servizio del gestionale, questi vettori sono trattati come groupage.
+GROUPAGE_CARRIERS = {"BRT", "MACSPED"}
+CONTRACT_SEED_FILE = SEED_DIR / "otd_contract_lead_times.csv"
+
+
+def _hours_to_days(value: Any) -> int | None:
+    """'72 h' -> 3 giorni lavorativi (24 ore = 1 giorno)."""
+    match = re.search(r"(\d+(?:[.,]\d+)?)", clean_text(value))
+    if not match:
+        return None
+    hours = float(match.group(1).replace(",", "."))
+    return max(int(-(-hours // 24)), 1)
+
+
+def parse_contract_workbook(content: bytes) -> list[dict[str, Any]]:
+    """Legge la rate card con i lead time standard per provincia.
+
+    Servono le colonne 'Province code', 'Groupage max 8 pallets' e 'Direct >= 9 pallet'.
+    """
+    workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    records: list[dict[str, Any]] = []
+    for sheet in workbook.worksheets:
+        header_row = None
+        cols: dict[str, int] = {}
+        for index, row in enumerate(sheet.iter_rows(values_only=True)):
+            normalized = [_norm_header(value) for value in row]
+            if header_row is None:
+                code = next((i for i, v in enumerate(normalized) if v in ("province code", "codice provincia")), None)
+                groupage = next((i for i, v in enumerate(normalized) if v.startswith("groupage max")), None)
+                direct = next((i for i, v in enumerate(normalized) if v.startswith("direct")), None)
+                if code is not None and groupage is not None and direct is not None:
+                    header_row = index
+                    region = next((i for i, v in enumerate(normalized) if v == "region"), None)
+                    cols = {"code": code, "groupage": groupage, "direct": direct}
+                    if region is not None:
+                        cols["region"] = region
+                continue
+            province = clean_text(row[cols["code"]]).upper() if cols["code"] < len(row) else ""
+            if len(province) != 2:
+                continue
+            groupage_days = _hours_to_days(row[cols["groupage"]] if cols["groupage"] < len(row) else None)
+            direct_days = _hours_to_days(row[cols["direct"]] if cols["direct"] < len(row) else None)
+            if groupage_days is None and direct_days is None:
+                continue
+            records.append({
+                "province": province,
+                "region": clean_text(row[cols["region"]]) if "region" in cols and cols["region"] < len(row) else "",
+                "groupage_days": groupage_days,
+                "direct_days": direct_days,
+            })
+        if records:
+            break
+    workbook.close()
+    if not records:
+        raise ValueError(
+            "Rate card non riconosciuta: servono le colonne 'Province code', "
+            "'Groupage max 8 pallets' e 'Direct >= 9 pallet' con i lead time in ore."
+        )
+    return records
+
+
+def _save_contract_records(records: list[dict[str, Any]], db_path: Path) -> None:
+    with _connect(db_path) as conn:
+        conn.execute("DELETE FROM otd_contract_lead_times")
+        conn.executemany(
+            "INSERT INTO otd_contract_lead_times (province, region, groupage_days, direct_days) VALUES (?,?,?,?)",
+            [(r["province"], r["region"], r["groupage_days"], r["direct_days"]) for r in records],
+        )
+
+
+def import_contract_lead_times(content: bytes, db_path: Path = DB_PATH) -> dict[str, Any]:
+    init_otd_db(db_path)
+    records = parse_contract_workbook(content)
+    _save_contract_records(records, db_path)
+    return {"provinces": len(records)}
+
+
+def ensure_contract_lead_times(db_path: Path = DB_PATH) -> None:
+    """Se la tabella e' vuota carica i lead time contrattuali inclusi in seed/."""
+    init_otd_db(db_path)
+    with _connect(db_path) as conn:
+        count = conn.execute("SELECT COUNT(*) FROM otd_contract_lead_times").fetchone()[0]
+    if count or not CONTRACT_SEED_FILE.exists():
+        return
+    with CONTRACT_SEED_FILE.open("r", newline="", encoding="utf-8-sig") as handle:
+        records = [
+            {
+                "province": clean_text(row.get("province")).upper(),
+                "region": clean_text(row.get("region")),
+                "groupage_days": _to_int(row.get("groupage_days")),
+                "direct_days": _to_int(row.get("direct_days")),
+            }
+            for row in csv.DictReader(handle)
+            if clean_text(row.get("province"))
+        ]
+    if records:
+        _save_contract_records(records, db_path)
+
+
+def list_contract_lead_times(db_path: Path = DB_PATH) -> list[dict[str, Any]]:
+    ensure_contract_lead_times(db_path)
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT province, region, groupage_days, direct_days FROM otd_contract_lead_times ORDER BY region, province"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def list_booked_destinations(db_path: Path = DB_PATH) -> list[dict[str, Any]]:
     init_otd_db(db_path)
     with _connect(db_path) as conn:
@@ -601,6 +720,21 @@ def _gestionale_unload_orders(db_path: Path) -> set[str]:
     return booked
 
 
+def _gestionale_services(db_path: Path) -> dict[str, str]:
+    """Servizio per ordine dal gestionale: Groupage (BRT LTL) oppure Diretto."""
+    services: dict[str, str] = {}
+    try:
+        with _connect(db_path) as conn:
+            rows = conn.execute("SELECT orders_text, service_type FROM shipments").fetchall()
+    except sqlite3.Error:
+        return services
+    for row in rows:
+        service = SERVICE_GROUPAGE if clean_text(row["service_type"]) == GROUPAGE_SERVICE_TYPE else SERVICE_DIRECT
+        for order_id in re.findall(r"\d{5,}", clean_text(row["orders_text"])):
+            services[order_id] = service
+    return services
+
+
 def _lead_time_lookup(lead_rows: list[dict[str, Any]]):
     table = {(row["carrier"], row["province"]): int(row["days"]) for row in lead_rows}
 
@@ -667,14 +801,28 @@ def compute_rows(db_path: Path = DB_PATH, today: date | None = None) -> list[dic
         orders = [dict(row) for row in conn.execute("SELECT * FROM otd_orders ORDER BY shipped_date, order_id")]
         overrides = {row["order_id"]: dict(row) for row in conn.execute("SELECT * FROM otd_overrides")}
     lookup = _lead_time_lookup(list_lead_times(db_path))
+    contract = {row["province"]: row for row in list_contract_lead_times(db_path)}
+    services = _gestionale_services(db_path)
     patterns = [row["pattern"] for row in list_booked_destinations(db_path)]
     gestionale_booked = _gestionale_unload_orders(db_path)
 
     rows: list[dict[str, Any]] = []
     for order in orders:
         override = overrides.get(order["order_id"]) or {}
+        service = services.get(order["order_id"])
+        service_source = "gestionale" if service else ""
+        if not service:
+            service = SERVICE_GROUPAGE if order["carrier"] in GROUPAGE_CARRIERS else SERVICE_DIRECT
+            service_source = "vettore"
+        # Priorita': regola manuale, lead time contrattuale (provincia + servizio), file OTM.
         lead = lookup(order["carrier"], order["dest_province"] or "*")
-        lead_source = "tabella" if lead is not None else ""
+        lead_source = "regola" if lead is not None else ""
+        if lead is None:
+            record = contract.get(order["dest_province"])
+            if record:
+                days = record["groupage_days"] if service == SERVICE_GROUPAGE else record["direct_days"]
+                if days is not None:
+                    lead, lead_source = int(days), "contratto"
         if lead is None and order.get("otm_lead_time") is not None:
             lead, lead_source = int(order["otm_lead_time"]), "OTM"
 
@@ -711,6 +859,8 @@ def compute_rows(db_path: Path = DB_PATH, today: date | None = None) -> list[dic
             "delivered": clean_text(order.get("delivered_date")) or clean_text(order.get("pod_date")),
             "lead": lead,
             "leadSource": lead_source,
+            "service": service,
+            "serviceSource": service_source,
             "booked": booked,
             "bookedSource": booked_source,
             "lastStatus": order["last_status_desc"],
@@ -751,6 +901,7 @@ def otd_payload(db_path: Path = DB_PATH) -> dict[str, Any]:
         "rows": rows,
         "summary": summarize(rows),
         "leadTimes": list_lead_times(db_path),
+        "contractLeadTimes": list_contract_lead_times(db_path),
         "bookedDestinations": list_booked_destinations(db_path),
         "outcomes": FORCED_OUTCOMES,
     }
@@ -806,11 +957,8 @@ def export_otd_report(
     downloads_dir: Path = DOWNLOADS_DIR,
     month: str = "",
     carrier: str = "",
-    exclude_booked: bool = False,
 ) -> Path:
     rows = compute_rows(db_path)
-    if exclude_booked:
-        rows = [row for row in rows if not row["booked"]]
     month = clean_text(month)
     carrier = _norm_carrier(carrier)
     if month:
@@ -830,8 +978,6 @@ def export_otd_report(
         scope.append(_month_label(month))
     if carrier:
         scope.append(carrier)
-    if exclude_booked:
-        scope.append("prenotate escluse")
     sheet["A2"] = (" - ".join(scope) if scope else "Tutti i mesi, tutti i vettori") + f" - generato il {datetime.now():%d/%m/%Y %H:%M}"
     total = summarize(rows)
     headers = ["", "Ordini", "OK", "NO", "Senza esito", "Altri esiti", "% OTD", "Ritardo medio gg"]
@@ -856,16 +1002,16 @@ def export_otd_report(
 
     detail_headers = [
         "Ordine", "Delivery Note", "Shipment", "Vettore", "Destinatario", "Citta", "Prov", "Partenza",
-        "Consegna", "Giorni lav.", "Lead time", "Origine lead time", "Prenotata", "Esito", "Esito forzato",
+        "Consegna", "Giorni lav.", "Lead time", "Origine lead time", "Servizio", "Prenotata", "Esito", "Esito forzato",
         "Ritardo gg", "Ultimo stato", "Motivi", "Note",
     ]
-    detail_widths = [13, 13, 18, 12, 38, 20, 6, 12, 12, 10, 10, 14, 11, 13, 12, 10, 24, 40, 30]
+    detail_widths = [13, 13, 18, 12, 38, 20, 6, 12, 12, 10, 10, 14, 11, 11, 13, 12, 10, 24, 40, 30]
 
     def detail_rows(items: list[dict[str, Any]]) -> list[list[Any]]:
         return [[
             row["id"], row["dn"], row["ship"], row["carrier"], row["dest"], row["city"], row["prov"],
             _from_iso(row["shipped"]), _from_iso(row["delivered"]), row["days"], row["lead"], row["leadSource"],
-            "SI" if row["booked"] else "NO", row["outcome"], "SI" if row["forced"] else "",
+            row["service"], "SI" if row["booked"] else "NO", row["outcome"], "SI" if row["forced"] else "",
             row["delay"], row["lastStatus"], row["reasons"], row["note"],
         ] for row in items]
 

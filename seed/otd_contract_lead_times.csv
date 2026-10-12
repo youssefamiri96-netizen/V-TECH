@@ -1,0 +1,110 @@
+province,region,groupage_days,direct_days
+AQ,Abruzzo,4,1
+CH,Abruzzo,3,1
+PE,Abruzzo,3,1
+TE,Abruzzo,3,1
+MT,Basilicata,4,2
+PZ,Basilicata,4,2
+CS,Calabria,4,2
+CZ,Calabria,4,2
+KR,Calabria,4,2
+RC,Calabria,4,2
+VV,Calabria,4,2
+AV,Campania,3,2
+BN,Campania,3,2
+CE,Campania,3,2
+NA,Campania,3,2
+SA,Campania,3,2
+BO,Emilia Romagna,2,1
+FC,Emilia Romagna,2,1
+FE,Emilia Romagna,3,1
+MO,Emilia Romagna,2,1
+PC,Emilia Romagna,2,1
+PR,Emilia Romagna,2,1
+RA,Emilia Romagna,2,1
+RE,Emilia Romagna,2,1
+RN,Emilia Romagna,2,1
+GO,Friuli Venezia Giulia,3,1
+PN,Friuli Venezia Giulia,3,1
+TS,Friuli Venezia Giulia,3,1
+UD,Friuli Venezia Giulia,3,1
+FR,Lazio,3,1
+LT,Lazio,3,1
+RI,Lazio,3,1
+RM,Lazio,3,1
+VT,Lazio,3,1
+GE,Liguria,3,1
+IM,Liguria,3,1
+SP,Liguria,3,1
+SV,Liguria,3,1
+BG,Lombardia,2,1
+BS,Lombardia,2,1
+CO,Lombardia,3,1
+CR,Lombardia,2,1
+LC,Lombardia,3,1
+LO,Lombardia,3,1
+MB,Lombardia,2,1
+MI,Lombardia,2,1
+MN,Lombardia,2,1
+PV,Lombardia,2,1
+SO,Lombardia,3,1
+VA,Lombardia,3,1
+AN,Marche,2,1
+AP,Marche,3,1
+MC,Marche,3,1
+PU,Marche,3,1
+CB,Molise,4,2
+IS,Molise,4,2
+AL,Piemonte,3,1
+AT,Piemonte,3,1
+BI,Piemonte,2,1
+CN,Piemonte,3,1
+NO,Piemonte,2,1
+TO,Piemonte,3,1
+VB,Piemonte,3,1
+VC,Piemonte,2,1
+BA,Puglia,4,2
+BR,Puglia,4,2
+BT,Puglia,4,2
+FG,Puglia,4,2
+LE,Puglia,4,2
+TA,Puglia,4,2
+CA,Sardegna,4,3
+NU,Sardegna,4,3
+OG,Sardegna,4,3
+OR,Sardegna,4,3
+OT,Sardegna,4,3
+SS,Sardegna,4,3
+SU,Sardegna,4,3
+VS,Sardegna,4,3
+AG,Sicilia,4,3
+CL,Sicilia,4,3
+CT,Sicilia,4,3
+EN,Sicilia,4,3
+ME,Sicilia,4,3
+PA,Sicilia,4,3
+RG,Sicilia,4,3
+SR,Sicilia,4,3
+TP,Sicilia,4,3
+AR,Toscana,3,1
+FI,Toscana,2,1
+GR,Toscana,3,1
+LI,Toscana,2,1
+LU,Toscana,2,1
+MS,Toscana,2,1
+PI,Toscana,2,1
+PO,Toscana,2,1
+PT,Toscana,2,1
+SI,Toscana,2,1
+BZ,Trentino Alto Adige,3,1
+TN,Trentino Alto Adige,3,1
+PG,Umbria,3,1
+TR,Umbria,3,1
+AO,Valle d'Aosta,4,1
+BL,Veneto,3,1
+PD,Veneto,2,1
+RO,Veneto,3,1
+TV,Veneto,3,1
+VE,Veneto,3,1
+VI,Veneto,3,1
+VR,Veneto,2,1

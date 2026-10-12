@@ -19,6 +19,7 @@
     loading: false,
     rows: [],
     leadTimes: [],
+    contractLeadTimes: [],
     bookedDestinations: [],
     outcomes: [],
     month: "",
@@ -26,7 +27,6 @@
     outcome: "",
     search: "",
     onlyAlert: false,
-    excludeBooked: false,
     selected: {},
     settingsOpen: false,
     busy: false,
@@ -121,7 +121,6 @@
       if (otd.carrier && row.carrier !== otd.carrier) return false;
       if (otd.outcome && row.outcome !== otd.outcome) return false;
       if (otd.onlyAlert && !row.noStatus10) return false;
-      if (otd.excludeBooked && row.booked) return false;
       if (!needle) return true;
       return [row.id, row.dn, row.ship, row.dest, row.city, row.prov, row.carrier, row.note].some(function (value) {
         return text(value).toLowerCase().indexOf(needle) !== -1;
@@ -249,7 +248,7 @@
     ensureNavButton();
     hideChrome();
     if (els.pageTitle) els.pageTitle.textContent = "OTD - On Time Delivery";
-    if (els.pageSubtitle) els.pageSubtitle.textContent = "Puntualita' delle consegne dal report OTM, con prenotate escluse e festivita' italiane";
+    if (els.pageSubtitle) els.pageSubtitle.textContent = "Puntualita' delle consegne dal report OTM, in giorni lavorativi (festivita' italiane escluse)";
     markNav();
     if (typeof renderSidebarStats === "function") renderSidebarStats();
 
@@ -265,7 +264,7 @@
       "    <div>",
       '      <span class="eyebrow">On Time Delivery</span>',
       '      <h2 id="otdHeadTitle">OTD</h2>',
-      "      <p>Carica il report OTM <strong>Order Status Code &amp; Reason Code</strong>: l'esito si calcola in giorni lavorativi (esclusi sabato, domenica e festivita' italiane) confrontando la consegna con il lead time. Le prenotate sono sempre OK. L'esito si puo' forzare a mano.</p>",
+      "      <p>Carica il report OTM <strong>Order Status Code &amp; Reason Code</strong>: l'esito si calcola in giorni lavorativi (esclusi sabato, domenica e festivita' italiane) confrontando la consegna con il lead time. Le prenotate sono OK in automatico quando risultano consegnate; se non lo sono ancora, non entrano nel conteggio. L'esito si puo' forzare a mano.</p>",
       "    </div>",
       '    <div class="otd-actions">',
       '      <button class="primary" data-otd="import">Carica report OTM</button>',
@@ -274,6 +273,7 @@
       "    </div>",
       '    <input type="file" id="otdFileInput" accept=".xlsx,.xlsm" hidden />',
       '    <input type="file" id="otdLeadFileInput" accept=".xlsx,.xlsm,.csv" hidden />',
+      '    <input type="file" id="otdContractFileInput" accept=".xlsx,.xlsm" hidden />',
       "  </div>",
       '  <div id="otdSettings"></div>',
       '  <div class="otd-kpis" id="otdKpis"></div>',
@@ -283,7 +283,6 @@
       '    <select id="otdOutcome"></select>',
       '    <input type="search" id="otdSearch" placeholder="Cerca ordine, delivery note, destinatario, citta..." autocomplete="off" />',
       '    <label class="check"><input type="checkbox" id="otdAlert" /> Solo senza esito oltre 10 gg</label>',
-      '    <label class="check" title="Di default le prenotate contano come OK, come nel foglio Haleon"><input type="checkbox" id="otdExcludeBooked" /> Escludi le prenotate dai KPI</label>',
       "  </div>",
       '  <div class="otd-grid">',
       '    <div class="otd-card" id="otdMonths"></div>',
@@ -327,7 +326,7 @@
       kpi("Ritardo medio", num(s.avgDelay, 1) + " gg", "solo sui NO", "ko"),
       kpi("Senza esito", num(s.noStatus), "non ancora consegnati", "wait"),
       kpi("Senza esito > 10 gg", num(s.alerts), "non prenotate", "wait"),
-      kpi("Prenotate", num(s.booked), otd.excludeBooked ? "escluse dai KPI" : "OK in automatico"),
+      kpi("Prenotate", num(s.booked), "OK se consegnate"),
     ].join("");
   }
 
@@ -361,8 +360,6 @@
     if (search && search !== document.activeElement) search.value = otd.search;
     var alertBox = document.querySelector("#otdAlert");
     if (alertBox) alertBox.checked = otd.onlyAlert;
-    var excludeBox = document.querySelector("#otdExcludeBooked");
-    if (excludeBox) excludeBox.checked = otd.excludeBooked;
   }
 
   function summaryRows(groups, labelFn) {
@@ -447,7 +444,7 @@
         '<td><input type="checkbox" data-otd-check="' + esc(row.id) + '"' + (otd.selected[row.id] ? " checked" : "") + " /></td>" +
         "<td>" + esc(row.id) + "</td><td>" + esc(row.carrier) + '</td><td class="wrap">' + esc(row.dest) + "</td><td>" + esc(row.prov) + "</td>" +
         "<td>" + esc(shortDate(row.shipped)) + "</td><td>" + esc(shortDate(row.delivered)) + "</td>" +
-        '<td class="r">' + (row.days === null || row.days === undefined ? "-" : row.days) + '</td><td class="r">' + (row.lead === null || row.lead === undefined ? "-" : row.lead) + "</td>" +
+        '<td class="r">' + (row.days === null || row.days === undefined ? "-" : row.days) + '</td><td class="r" title="' + esc((row.leadSource || "nessuna regola") + (row.service ? " - " + row.service + " (" + row.serviceSource + ")" : "")) + '">' + (row.lead === null || row.lead === undefined ? "-" : row.lead) + "</td><td>" + esc(row.service) + "</td>" +
         "<td>" + (row.booked ? "SI (" + esc(row.bookedSource) + ")" : "NO") + "</td>" +
         '<td><span class="otd-chip ' + tone + '">' + esc(row.outcome) + "</span>" + (row.forced ? '<span class="otd-forced" title="Esito forzato a mano">&#9998;</span>' : "") +
         (row.noStatus10 ? ' <span class="otd-chip wait" title="Senza esito da oltre 10 giorni lavorativi">&gt;10 gg</span>' : "") + "</td>" +
@@ -458,8 +455,8 @@
       rows.length > ROW_LIMIT ? '<div class="otd-note">Mostro i primi ' + ROW_LIMIT + " ordini: usa i filtri per restringere. L'export Excel contiene tutto.</div>" : "",
       '<table class="otd-table"><thead><tr><th><input type="checkbox" data-otd-checkall' + (allChecked ? " checked" : "") + ' /></th>',
       "<th>Ordine</th><th>Vettore</th><th>Destinatario</th><th>Prov</th><th>Partenza</th><th>Consegna</th>",
-      '<th class="r">Giorni lav.</th><th class="r">Lead time</th><th>Prenotata</th><th>Esito</th><th class="r">Ritardo</th><th>Note / motivi</th></tr></thead>',
-      "<tbody>" + (body || '<tr><td colspan="13" class="otd-note">Nessun ordine con questi filtri.</td></tr>') + "</tbody></table>",
+      '<th class="r">Giorni lav.</th><th class="r">Lead time</th><th>Servizio</th><th>Prenotata</th><th>Esito</th><th class="r">Ritardo</th><th>Note / motivi</th></tr></thead>',
+      "<tbody>" + (body || '<tr><td colspan="14" class="otd-note">Nessun ordine con questi filtri.</td></tr>') + "</tbody></table>",
     ].join("");
   }
 
@@ -477,11 +474,22 @@
     var bookedRows = otd.bookedDestinations.map(function (item) {
       return "<tr><td>" + esc(item.pattern) + '</td><td><button class="otd-x" data-otd="booked-del" data-id="' + item.id + '" title="Elimina">&times;</button></td></tr>';
     }).join("");
+    var contractRows = otd.contractLeadTimes.map(function (item) {
+      return "<tr><td>" + esc(item.province) + "</td><td>" + esc(item.region) + '</td><td class="r">' + (item.groupage_days === null ? "-" : item.groupage_days) +
+        '</td><td class="r">' + (item.direct_days === null ? "-" : item.direct_days) + "</td></tr>";
+    }).join("");
     box.innerHTML = [
+      '<div class="otd-card">',
+      "  <h3>Lead time contrattuali (giorni lavorativi)</h3>",
+      '  <div class="otd-note" style="margin:0 0 10px">Per provincia e servizio: <strong>Groupage</strong> (fino a 8 pallet, spedizioni BRT LTL del gestionale) e <strong>Diretto</strong> (9 pallet o piu\'). Il servizio di ogni ordine si legge dal gestionale; se l\'ordine non c\'e\', BRT e Macsped sono groupage e gli altri vettori diretto. Sono stati caricati da rate card: ' + otd.contractLeadTimes.length + ' province. ' +
+        '<button data-otd="contract-upload">Aggiorna da rate card (Excel)</button></div>',
+      '  <details><summary>Vedi i lead time per provincia</summary><div style="max-height:260px;overflow:auto;margin-top:8px"><table class="otd-table"><thead><tr><th>Prov</th><th>Regione</th><th class="r">Groupage</th><th class="r">Diretto</th></tr></thead><tbody>' +
+        (contractRows || '<tr><td colspan="4" class="otd-note">Nessun lead time contrattuale.</td></tr>') + "</tbody></table></div></details>",
+      "</div>",
       '<div class="otd-settings-grid">',
       '  <div class="otd-card">',
-      "    <h3>Lead time (giorni lavorativi)</h3>",
-      '    <div class="otd-note" style="margin:0 0 10px">Ordine di ricerca: vettore + provincia, poi solo vettore, poi solo provincia, poi lead time del file OTM. Per un valore valido per tutto il vettore lascia vuota la provincia.</div>',
+      "    <h3>Eccezioni lead time (regole manuali)</h3>",
+      '    <div class="otd-note" style="margin:0 0 10px">Hanno la precedenza sul contratto: vettore + provincia, poi solo vettore, poi solo provincia. Senza regole e senza contratto si usa il lead time del file OTM. Per un valore valido per tutto il vettore lascia vuota la provincia.</div>',
       '    <div class="otd-inline">',
       '      <input id="otdLeadCarrier" placeholder="Vettore" />',
       '      <input id="otdLeadProv" placeholder="Prov. (facolt.)" maxlength="2" style="min-width:80px;width:100px" />',
@@ -490,7 +498,7 @@
       '      <button data-otd="lead-upload">Carica da Excel/CSV</button>',
       "    </div>",
       '    <table class="otd-table"><thead><tr><th>Vettore</th><th>Provincia</th><th class="r">Giorni</th><th></th></tr></thead><tbody>' +
-        (leadRows || '<tr><td colspan="4" class="otd-note">Nessuna regola: si usa il lead time del file OTM.</td></tr>') + "</tbody></table>",
+        (leadRows || '<tr><td colspan="4" class="otd-note">Nessuna eccezione: valgono i lead time contrattuali.</td></tr>') + "</tbody></table>",
       '    <div class="otd-note">File Excel/CSV con colonne: Vettore, Provincia (facoltativa), Lead time.</div>',
       "  </div>",
       '  <div class="otd-card">',
@@ -507,6 +515,7 @@
   function applyPayload(payload) {
     otd.rows = payload.rows || [];
     otd.leadTimes = payload.leadTimes || [];
+    otd.contractLeadTimes = payload.contractLeadTimes || [];
     otd.bookedDestinations = payload.bookedDestinations || [];
     otd.outcomes = payload.outcomes || [];
     otd.loaded = true;
@@ -549,10 +558,11 @@
     if (!file) return;
     var content = await fileToBase64(file);
     await run({ action: action, filename: file.name, contentBase64: content }, function (result) {
-      var s = result.summary || {};
+      var s = result.importSummary || {};
       if (action === "import") {
         return "Importati " + num(s.orders) + " ordini (" + num(s.new) + " nuovi, " + num(s.updated) + " aggiornati, " + num(s.delivered) + " consegnati).";
       }
+      if (action === "contract_import") return label + ": caricate " + num(s.provinces) + " province.";
       return label + ": " + num(s.saved) + " regole salvate" + (s.skipped ? ", " + s.skipped + " scartate" : "") + ".";
     });
   }
@@ -594,11 +604,12 @@
     var ids = selectedIds();
     if (action === "import") document.querySelector("#otdFileInput").click();
     else if (action === "lead-upload") document.querySelector("#otdLeadFileInput").click();
+    else if (action === "contract-upload") document.querySelector("#otdContractFileInput").click();
     else if (action === "settings") {
       otd.settingsOpen = !otd.settingsOpen;
       renderSettings();
     } else if (action === "export") {
-      run({ action: "export", month: otd.month, carrier: otd.carrier, excludeBooked: otd.excludeBooked }, "Excel OTD generato.").then(function (result) {
+      run({ action: "export", month: otd.month, carrier: otd.carrier }, "Excel OTD generato.").then(function (result) {
         if (result && result.downloadUrl && typeof triggerDownload === "function") triggerDownload(result.downloadUrl);
       });
     } else if (action === "clear-selection") {
@@ -642,6 +653,9 @@
     } else if (target.id === "otdLeadFileInput") {
       importFile(target.files[0], "lead_times_import", "Lead time");
       target.value = "";
+    } else if (target.id === "otdContractFileInput") {
+      importFile(target.files[0], "contract_import", "Lead time contrattuali");
+      target.value = "";
     } else if (target.id === "otdMonth") {
       otd.month = target.value;
       renderKpis(); renderCarriers(); renderList();
@@ -653,9 +667,6 @@
       renderKpis(); renderMonths(); renderCarriers(); renderList();
     } else if (target.id === "otdAlert") {
       otd.onlyAlert = target.checked;
-      renderKpis(); renderMonths(); renderCarriers(); renderList();
-    } else if (target.id === "otdExcludeBooked") {
-      otd.excludeBooked = target.checked;
       renderKpis(); renderMonths(); renderCarriers(); renderList();
     }
   }
