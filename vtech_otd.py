@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import re
 import sqlite3
 from collections import defaultdict
@@ -34,7 +35,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from vtech_app import DB_PATH, DOWNLOADS_DIR, SEED_DIR, clean_text
+from vtech_app import DB_PATH, DOWNLOADS_DIR, SEED_DIR, classify_unloading_booking, clean_text
 
 OUTCOME_OK = "OK"
 OUTCOME_NO = "NO"
@@ -720,19 +721,65 @@ def _gestionale_unload_orders(db_path: Path) -> set[str]:
     return booked
 
 
-def _gestionale_services(db_path: Path) -> dict[str, str]:
-    """Servizio per ordine dal gestionale: Groupage (BRT LTL) oppure Diretto."""
-    services: dict[str, str] = {}
+KIND_BOOK = "prenotare"
+KIND_FIXED = "tassativa"
+# Classificazione del gestionale (classify_unloading_booking): BKL = da prenotare,
+# BKV = gia' prenotato da loro / DKV = data tassativa.
+BOOKING_KINDS = {
+    "Da prenotare": KIND_BOOK,
+    "Gia prenotato da loro": KIND_FIXED,
+    "Data tassativa": KIND_FIXED,
+}
+
+
+def _first_date(*values: Any) -> date | None:
+    for value in values:
+        parsed = parse_date(value)
+        if parsed:
+            return parsed
+    return None
+
+
+def _gestionale_orders(db_path: Path) -> dict[str, dict[str, Any]]:
+    """Per ordine, dal gestionale: servizio, freight (BKL/BKV...) e data di scarico tassativa.
+
+    - BKL (da prenotare) -> kind "prenotare";
+    - BKV/DKV (tassative) -> kind "tassativa", con la data da rispettare: Data Consegna
+      Tassativa se inserita, altrimenti la Early Delivery Date del report WMS.
+    """
+    info: dict[str, dict[str, Any]] = {}
     try:
         with _connect(db_path) as conn:
-            rows = conn.execute("SELECT orders_text, service_type FROM shipments").fetchall()
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(shipments)")}
+            required_col = "required_delivery_date" if "required_delivery_date" in columns else "NULL"
+            rows = conn.execute(
+                f"SELECT orders_text, service_type, freight_code, booking_status, "
+                f"{required_col} AS required_date, payload_json FROM shipments"
+            ).fetchall()
     except sqlite3.Error:
-        return services
+        return info
     for row in rows:
+        try:
+            payload = json.loads(row["payload_json"] or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        freight = clean_text(row["freight_code"]) or clean_text(payload.get("Freight Code"))
+        booking = clean_text(row["booking_status"]) or clean_text(payload.get("Prenotazione Scarico")) or classify_unloading_booking(freight)
+        kind = BOOKING_KINDS.get(booking, "")
+        target = None
+        if kind == KIND_FIXED:
+            target = _first_date(
+                row["required_date"],
+                payload.get("Data Consegna Tassativa"),
+                payload.get("Early Delivery Date"),
+                payload.get("Early Delivery Date Originale"),
+            )
         service = SERVICE_GROUPAGE if clean_text(row["service_type"]) == GROUPAGE_SERVICE_TYPE else SERVICE_DIRECT
         for order_id in re.findall(r"\d{5,}", clean_text(row["orders_text"])):
-            services[order_id] = service
-    return services
+            info[order_id] = {"service": service, "kind": kind, "freight": freight, "target": target}
+    return info
 
 
 def _lead_time_lookup(lead_rows: list[dict[str, Any]]):
@@ -753,18 +800,29 @@ def evaluate_order(
     booked: bool,
     forced_outcome: str,
     today: date,
+    required_date: date | None = None,
 ) -> dict[str, Any]:
-    """Esito di un ordine. Restituisce outcome, auto, days, delay, noStatus10."""
+    """Esito di un ordine. Restituisce outcome, auto, days, delay, noStatus10, rule.
+
+    Con required_date (consegna tassativa BKV/DKV) l'ordine deve arrivare entro quella
+    data, a meno che sia stato segnato prenotato a mano; altrimenti vale il lead time.
+    """
     shipped = _from_iso(order.get("shipped_date"))
     delivered = _from_iso(order.get("delivered_date")) or _from_iso(order.get("pod_date"))
     days = working_days_between(shipped, delivered) if shipped and delivered else None
+    fixed = required_date is not None and not booked
+    rule = "Prenotata" if booked else ("Tassativa" if fixed else "Lead time")
     delay = None
-    if days is not None and lead_time is not None and days > lead_time:
+    if fixed and delivered and delivered > required_date:
+        delay = working_days_between(required_date, delivered)
+    elif not fixed and days is not None and lead_time is not None and days > lead_time:
         delay = days - lead_time
 
     if delivered and shipped:
         if booked:
             auto = OUTCOME_OK
+        elif fixed:
+            auto = OUTCOME_OK if delivered <= required_date else OUTCOME_NO
         elif lead_time is None:
             auto = OUTCOME_NO_STATUS
         else:
@@ -777,8 +835,11 @@ def evaluate_order(
         auto = OUTCOME_NO_STATUS
 
     outcome = forced_outcome or auto
-    if outcome == OUTCOME_NO and delay is None and days is not None and lead_time is not None:
-        delay = max(days - lead_time, 0)
+    if outcome == OUTCOME_NO and delay is None:
+        if fixed and delivered:
+            delay = working_days_between(required_date, delivered)
+        elif days is not None and lead_time is not None:
+            delay = max(days - lead_time, 0)
     no_status_alert = bool(
         outcome == OUTCOME_NO_STATUS
         and not booked
@@ -791,6 +852,7 @@ def evaluate_order(
         "days": days,
         "delay": delay if outcome == OUTCOME_NO else None,
         "noStatus10": no_status_alert,
+        "rule": rule,
     }
 
 
@@ -802,14 +864,15 @@ def compute_rows(db_path: Path = DB_PATH, today: date | None = None) -> list[dic
         overrides = {row["order_id"]: dict(row) for row in conn.execute("SELECT * FROM otd_overrides")}
     lookup = _lead_time_lookup(list_lead_times(db_path))
     contract = {row["province"]: row for row in list_contract_lead_times(db_path)}
-    services = _gestionale_services(db_path)
+    gestionale = _gestionale_orders(db_path)
     patterns = [row["pattern"] for row in list_booked_destinations(db_path)]
     gestionale_booked = _gestionale_unload_orders(db_path)
 
     rows: list[dict[str, Any]] = []
     for order in orders:
         override = overrides.get(order["order_id"]) or {}
-        service = services.get(order["order_id"])
+        info = gestionale.get(order["order_id"]) or {}
+        service = info.get("service")
         service_source = "gestionale" if service else ""
         if not service:
             service = SERVICE_GROUPAGE if order["carrier"] in GROUPAGE_CARRIERS else SERVICE_DIRECT
@@ -830,10 +893,15 @@ def compute_rows(db_path: Path = DB_PATH, today: date | None = None) -> list[dic
         if override.get("booked") is not None:
             booked = bool(override["booked"])
             booked_source = "manuale" if booked else ""
+        elif info.get("kind") == KIND_FIXED and info.get("target"):
+            # Tassativa: conta la data da rispettare, non lo stato di prenotazione.
+            booked = False
         else:
             booked = False
             destination = clean_text(order.get("dest_location")).upper()
-            if order.get("booked_otm"):
+            if info.get("kind") == KIND_BOOK:
+                booked, booked_source = True, "BKL"
+            elif order.get("booked_otm"):
                 booked, booked_source = True, "OTM"
             elif any(pattern in destination for pattern in patterns):
                 booked, booked_source = True, "elenco"
@@ -841,7 +909,8 @@ def compute_rows(db_path: Path = DB_PATH, today: date | None = None) -> list[dic
                 booked, booked_source = True, "gestionale"
 
         forced = clean_text(override.get("outcome"))
-        result = evaluate_order(order, lead, booked, forced, today)
+        target = info.get("target") if info.get("kind") == KIND_FIXED else None
+        result = evaluate_order(order, lead, booked, forced, today, target)
         shipped = clean_text(order.get("shipped_date"))
         rows.append({
             "id": order["order_id"],
@@ -861,6 +930,8 @@ def compute_rows(db_path: Path = DB_PATH, today: date | None = None) -> list[dic
             "leadSource": lead_source,
             "service": service,
             "serviceSource": service_source,
+            "freight": clean_text(info.get("freight")),
+            "target": _iso(target),
             "booked": booked,
             "bookedSource": booked_source,
             "lastStatus": order["last_status_desc"],
@@ -1002,16 +1073,16 @@ def export_otd_report(
 
     detail_headers = [
         "Ordine", "Delivery Note", "Shipment", "Vettore", "Destinatario", "Citta", "Prov", "Partenza",
-        "Consegna", "Giorni lav.", "Lead time", "Origine lead time", "Servizio", "Prenotata", "Esito", "Esito forzato",
+        "Consegna", "Giorni lav.", "Lead time", "Origine lead time", "Servizio", "Regola", "Data tassativa", "Prenotata", "Esito", "Esito forzato",
         "Ritardo gg", "Ultimo stato", "Motivi", "Note",
     ]
-    detail_widths = [13, 13, 18, 12, 38, 20, 6, 12, 12, 10, 10, 14, 11, 11, 13, 12, 10, 24, 40, 30]
+    detail_widths = [13, 13, 18, 12, 38, 20, 6, 12, 12, 10, 10, 14, 11, 12, 14, 11, 13, 12, 10, 24, 40, 30]
 
     def detail_rows(items: list[dict[str, Any]]) -> list[list[Any]]:
         return [[
             row["id"], row["dn"], row["ship"], row["carrier"], row["dest"], row["city"], row["prov"],
             _from_iso(row["shipped"]), _from_iso(row["delivered"]), row["days"], row["lead"], row["leadSource"],
-            row["service"], "SI" if row["booked"] else "NO", row["outcome"], "SI" if row["forced"] else "",
+            row["service"], row["rule"], _from_iso(row["target"]), "SI" if row["booked"] else "NO", row["outcome"], "SI" if row["forced"] else "",
             row["delay"], row["lastStatus"], row["reasons"], row["note"],
         ] for row in items]
 
@@ -1022,7 +1093,7 @@ def export_otd_report(
         target.freeze_panes = "A2"
         target.auto_filter.ref = f"A1:{get_column_letter(len(detail_headers))}{max(len(data) + 1, 2)}"
         for index, item in enumerate(items, start=2):
-            for col in (8, 9):
+            for col in (8, 9, 15):
                 target.cell(row=index, column=col).number_format = "DD/MM/YYYY"
             fill = NO_FILL if item["outcome"] == OUTCOME_NO else (WARN_FILL if item["noStatus10"] else None)
             if fill:
