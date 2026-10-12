@@ -721,6 +721,9 @@ def _gestionale_unload_orders(db_path: Path) -> set[str]:
     return booked
 
 
+# Ordini con questi vettori sono VAS (servizi a valore aggiunto): fuori da ogni calcolo OTD.
+EXCLUDED_CARRIERS = {"KN"}
+
 KIND_BOOK = "prenotare"
 KIND_FIXED = "tassativa"
 # Classificazione del gestionale (classify_unloading_booking): BKL = da prenotare,
@@ -870,6 +873,8 @@ def compute_rows(db_path: Path = DB_PATH, today: date | None = None) -> list[dic
 
     rows: list[dict[str, Any]] = []
     for order in orders:
+        if order["carrier"] in EXCLUDED_CARRIERS:
+            continue
         override = overrides.get(order["order_id"]) or {}
         info = gestionale.get(order["order_id"]) or {}
         service = info.get("service")
@@ -924,6 +929,7 @@ def compute_rows(db_path: Path = DB_PATH, today: date | None = None) -> list[dic
             "weight": order["weight"],
             "volume": order["volume"],
             "shipped": shipped,
+            "sinceShip": working_days_between(_from_iso(shipped), today) if _from_iso(shipped) else None,
             "month": shipped[:7],
             "delivered": clean_text(order.get("delivered_date")) or clean_text(order.get("pod_date")),
             "lead": lead,
@@ -966,9 +972,20 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def count_excluded(db_path: Path = DB_PATH) -> int:
+    init_otd_db(db_path)
+    placeholders = ",".join("?" for _ in EXCLUDED_CARRIERS)
+    with _connect(db_path) as conn:
+        return conn.execute(
+            f"SELECT COUNT(*) FROM otd_orders WHERE carrier IN ({placeholders})", tuple(EXCLUDED_CARRIERS)
+        ).fetchone()[0]
+
+
 def otd_payload(db_path: Path = DB_PATH) -> dict[str, Any]:
     rows = compute_rows(db_path)
     return {
+        "excluded": count_excluded(db_path),
+        "excludedCarriers": sorted(EXCLUDED_CARRIERS),
         "rows": rows,
         "summary": summarize(rows),
         "leadTimes": list_lead_times(db_path),
@@ -1073,15 +1090,15 @@ def export_otd_report(
 
     detail_headers = [
         "Ordine", "Delivery Note", "Shipment", "Vettore", "Destinatario", "Citta", "Prov", "Partenza",
-        "Consegna", "Giorni lav.", "Lead time", "Origine lead time", "Servizio", "Regola", "Data tassativa", "Prenotata", "Esito", "Esito forzato",
+        "Consegna", "Giorni lav.", "Giorni da partenza", "Lead time", "Origine lead time", "Servizio", "Regola", "Data tassativa", "Prenotata", "Esito", "Esito forzato",
         "Ritardo gg", "Ultimo stato", "Motivi", "Note",
     ]
-    detail_widths = [13, 13, 18, 12, 38, 20, 6, 12, 12, 10, 10, 14, 11, 12, 14, 11, 13, 12, 10, 24, 40, 30]
+    detail_widths = [13, 13, 18, 12, 38, 20, 6, 12, 12, 10, 12, 10, 14, 11, 12, 14, 11, 13, 12, 10, 24, 40, 30]
 
     def detail_rows(items: list[dict[str, Any]]) -> list[list[Any]]:
         return [[
             row["id"], row["dn"], row["ship"], row["carrier"], row["dest"], row["city"], row["prov"],
-            _from_iso(row["shipped"]), _from_iso(row["delivered"]), row["days"], row["lead"], row["leadSource"],
+            _from_iso(row["shipped"]), _from_iso(row["delivered"]), row["days"], row["sinceShip"], row["lead"], row["leadSource"],
             row["service"], row["rule"], _from_iso(row["target"]), "SI" if row["booked"] else "NO", row["outcome"], "SI" if row["forced"] else "",
             row["delay"], row["lastStatus"], row["reasons"], row["note"],
         ] for row in items]
@@ -1093,7 +1110,7 @@ def export_otd_report(
         target.freeze_panes = "A2"
         target.auto_filter.ref = f"A1:{get_column_letter(len(detail_headers))}{max(len(data) + 1, 2)}"
         for index, item in enumerate(items, start=2):
-            for col in (8, 9, 15):
+            for col in (8, 9, 16):
                 target.cell(row=index, column=col).number_format = "DD/MM/YYYY"
             fill = NO_FILL if item["outcome"] == OUTCOME_NO else (WARN_FILL if item["noStatus10"] else None)
             if fill:
@@ -1102,7 +1119,10 @@ def export_otd_report(
 
     add_detail_sheet("Dettaglio", rows)
     add_detail_sheet("Ritardi (NO)", [row for row in rows if row["outcome"] == OUTCOME_NO])
-    add_detail_sheet("Senza esito oltre 10 gg", [row for row in rows if row["noStatus10"]])
+    no_status = [row for row in rows if row["outcome"] == OUTCOME_NO_STATUS]
+    no_status.sort(key=lambda row: -(row["sinceShip"] or 0))
+    add_detail_sheet("Senza esito (tutti)", no_status)
+    add_detail_sheet("Senza esito oltre 10 gg", [row for row in no_status if row["noStatus10"]])
 
     downloads_dir.mkdir(parents=True, exist_ok=True)
     suffix = "_".join(part for part in [month, carrier] if part) or "tutti"

@@ -22,6 +22,8 @@
     contractLeadTimes: [],
     bookedDestinations: [],
     outcomes: [],
+    excluded: 0,
+    excludedCarriers: [],
     month: "",
     carrier: "",
     outcome: "",
@@ -308,7 +310,8 @@
   function renderHead() {
     var title = document.querySelector("#otdHeadTitle");
     if (!title) return;
-    title.textContent = otd.loading && !otd.rows.length ? "Caricamento..." : num(otd.rows.length) + " ordini importati";
+    title.textContent = otd.loading && !otd.rows.length ? "Caricamento..." : num(otd.rows.length) + " ordini" +
+      (otd.excluded ? " (esclusi " + num(otd.excluded) + " ordini " + (otd.excludedCarriers || []).join("/") + " - VAS)" : "");
   }
 
   function kpi(label, value, sub, tone) {
@@ -518,6 +521,8 @@
     otd.contractLeadTimes = payload.contractLeadTimes || [];
     otd.bookedDestinations = payload.bookedDestinations || [];
     otd.outcomes = payload.outcomes || [];
+    otd.excluded = payload.excluded || 0;
+    otd.excludedCarriers = payload.excludedCarriers || [];
     otd.loaded = true;
     var valid = {};
     otd.rows.forEach(function (row) { valid[row.id] = true; });
