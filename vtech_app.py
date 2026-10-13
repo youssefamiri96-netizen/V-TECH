@@ -4021,7 +4021,7 @@ def export_wholesaler_credit_notes(
             continue  # GDO anche con le regole di oggi: nessuna differenza da stornare
         records.append(record)
     if not records:
-        raise ValueError("Nessuna nota di credito da emettere e nessuna DKV da addebitare.")
+        raise ValueError("Nessuna nota di credito da emettere.")
     records.sort(key=lambda item: (
         item["month"],
         item["kind"],
@@ -4043,26 +4043,37 @@ def export_wholesaler_credit_notes(
     workbook = Workbook()
     months_sheet = workbook.active
     months_sheet.title = "Note di credito"
-    months_sheet.append([
-        "Mese",
-        "Storno grossisti",
-        "Storno Amazon (extra doppio)",
-        "DKV da addebitare",
-        "Nota di credito netta",
-        "Spedizioni",
-    ])
+    # Le colonne Amazon e DKV compaiono solo se ci sono davvero righe di quel tipo.
+    kinds_present = {record["kind"] for record in records}
+    month_columns: list[tuple[str, Any]] = [
+        ("Storno grossisti", lambda items: round(sum(i["credit"] for i in items if i["kind"] == TYPE_GDO), 2)),
+    ]
+    if TYPE_AMAZON in kinds_present:
+        month_columns.append((
+            "Storno Amazon (extra doppio)",
+            lambda items: round(sum(i["credit"] for i in items if i["kind"] == TYPE_AMAZON), 2),
+        ))
+    if TYPE_DKV in kinds_present:
+        month_columns.append((
+            "DKV da addebitare",
+            lambda items: round(-sum(i["credit"] for i in items if i["kind"] == TYPE_DKV), 2),
+        ))
+    month_columns.append(("Nota di credito netta", lambda items: round(sum(i["credit"] for i in items), 2)))
+    month_columns.append(("Spedizioni", lambda items: len(items)))
+    months_sheet.append(["Mese", *[title for title, _getter in month_columns]])
     by_month: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         by_month.setdefault(record["month"], []).append(record)
     for month, items in sorted(by_month.items()):
-        gdo_total = round(sum(item["credit"] for item in items if item["kind"] == TYPE_GDO), 2)
-        amazon_total = round(sum(item["credit"] for item in items if item["kind"] == TYPE_AMAZON), 2)
-        dkv_total = round(-sum(item["credit"] for item in items if item["kind"] == TYPE_DKV), 2)
-        months_sheet.append([month, gdo_total, amazon_total, dkv_total, round(gdo_total + amazon_total - dkv_total, 2), len(items)])
+        months_sheet.append([month, *[getter(items) for _title, getter in month_columns]])
     month_total_row = months_sheet.max_row + 1
-    months_sheet.append(["Totale", *[sum_formula(column, month_total_row) for column in range(2, 7)]])
+    months_sheet.append(["Totale", *[sum_formula(column, month_total_row) for column in range(2, len(month_columns) + 2)]])
     style_total_row(months_sheet, month_total_row, "DBEAFE")
-    _style_passive_sheet(months_sheet, money_columns=[2, 3, 4, 5], numeric_columns=[6])
+    _style_passive_sheet(
+        months_sheet,
+        money_columns=list(range(2, len(month_columns) + 1)),
+        numeric_columns=[len(month_columns) + 1],
+    )
     add_table(months_sheet, "NoteCredito", "TableStyleMedium2", True)
 
     detail_sheet = workbook.create_sheet("Dettaglio")
