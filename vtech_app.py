@@ -49,7 +49,13 @@ from vtech_importer import (
     serialize,
     write_csv,
 )
-from tariff_engine import apply_contract_sla_to_shipments, apply_tariffs_to_shipments, default_carrier_tariffs_path
+from tariff_engine import (
+    CUSTOMER_TYPE_WHOLESALER,
+    WHOLESALER_RULE_START,
+    apply_contract_sla_to_shipments,
+    apply_tariffs_to_shipments as engine_apply_tariffs_to_shipments,
+    default_carrier_tariffs_path,
+)
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -210,6 +216,59 @@ def ensure_seed_data_files() -> None:
         target = DATA_DIR / filename
         if source.exists() and source.resolve() != target.resolve() and not target.exists():
             shutil.copyfile(source, target)
+    migrate_gdo_customers_to_wholesaler_split()
+
+
+def csv_has_column(path: Path, column: str) -> bool:
+    try:
+        with path.open("r", newline="", encoding="utf-8-sig") as file:
+            return column in (csv.DictReader(file).fieldnames or [])
+    except OSError:
+        return False
+
+
+def migrate_gdo_customers_to_wholesaler_split() -> None:
+    """Porta l'anagrafica `gdo_customers.csv` esistente alla versione con la colonna
+    `Tipo Cliente` (GDO / GROSSISTA).
+
+    Il file in DATA_DIR non viene mai sovrascritto dal seed, quindi senza questo
+    passaggio i server gia' attivi continuerebbero a trattare i grossisti come GDO.
+    Le righe del seed vincono; le righe presenti solo nel file vecchio (aggiunte a
+    mano) restano come GDO, che era l'unico significato che avevano. Prima di
+    scrivere si salva una copia del file originale.
+    """
+    seed = SEED_DIR / "gdo_customers.csv"
+    target = GDO_CUSTOMERS_PATH
+    if not seed.exists() or not target.exists() or seed.resolve() == target.resolve():
+        return
+    if csv_has_column(target, "Tipo Cliente") or not csv_has_column(seed, "Tipo Cliente"):
+        return
+
+    def read_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+        with path.open("r", newline="", encoding="utf-8-sig") as file:
+            reader = csv.DictReader(file)
+            return list(reader.fieldnames or []), list(reader)
+
+    seed_fields, seed_rows = read_rows(seed)
+    _target_fields, target_rows = read_rows(target)
+    seed_keys = {(clean_text(r.get("Codice Cliente")), clean_text(r.get("Ship To Location"))) for r in seed_rows}
+    merged = list(seed_rows)
+    for row in target_rows:
+        key = (clean_text(row.get("Codice Cliente")), clean_text(row.get("Ship To Location")))
+        if key in seed_keys:
+            continue
+        legacy_row = {field: row.get(field, "") for field in seed_fields}
+        legacy_row["GDO"] = "SI"
+        legacy_row["Tipo Cliente"] = "GDO"
+        merged.append(legacy_row)
+
+    backup = target.with_name("gdo_customers_prima_grossisti.csv")
+    if not backup.exists():
+        shutil.copyfile(target, backup)
+    with target.open("w", newline="", encoding="utf-8-sig") as file:
+        writer = csv.DictWriter(file, fieldnames=seed_fields, lineterminator="\r\n")
+        writer.writeheader()
+        writer.writerows(merged)
 
 
 ensure_seed_data_files()
@@ -659,6 +718,19 @@ def billing_reference_date(row: dict[str, Any]) -> date | None:
         if parsed:
             return parsed
     return None
+
+
+def wholesaler_rule_applies(row: dict[str, Any]) -> bool:
+    """True se la spedizione e' di competenza da ottobre 2026 in poi, cioe' quando i
+    grossisti dell'anagrafica non sono piu' trattati come GDO. I mesi precedenti
+    restano come gia' fatturati (tutti GDO)."""
+    ref_date = billing_reference_date(row)
+    return ref_date is None or ref_date >= WHOLESALER_RULE_START
+
+
+def apply_tariffs_to_shipments(shipment_rows: list[dict[str, Any]], **kwargs: Any) -> None:
+    kwargs.setdefault("wholesaler_rule", wholesaler_rule_applies)
+    engine_apply_tariffs_to_shipments(shipment_rows, **kwargs)
 
 
 def display_value(row: dict[str, Any], column: str) -> str:
@@ -3770,6 +3842,238 @@ def export_active_billing_report(
     workbook.save(output_path)
     if not output_path.exists() or output_path.stat().st_size == 0:
         raise OSError(f"Excel fatturazione attiva non creato correttamente: {output_path}")
+    return output_path
+
+
+def resolve_active_rates_path() -> Path | None:
+    settings = load_settings()
+    active_path_text = settings.get("active_rates_path")
+    active_path = Path(active_path_text) if active_path_text else DEFAULT_ACTIVE_PATH
+    if not active_path.exists() and DATA_ACTIVE_RATES_PATH.exists():
+        active_path = DATA_ACTIVE_RATES_PATH
+    return active_path if active_path.exists() else None
+
+
+def export_wholesaler_credit_notes(
+    month_key: str | None = None,
+    db_path: Path = DB_PATH,
+    downloads_dir: Path = DOWNLOADS_DIR,
+) -> Path:
+    """Excel per le note di credito sui mesi gia' fatturati con i grossisti trattati
+    come GDO (mesi precedenti a WHOLESALER_RULE_START).
+
+    Per ogni spedizione di un cliente GROSSISTA dell'anagrafica si confronta
+    l'attivo calcolato con la vecchia regola (extra GDO +20%, quello fatturato) con
+    quello ricalcolato da grossista: senza extra GDO, con gli altri extra dovuti
+    (preavviso telefonico BKL, fixed time slot BKV, ETS, fuel...) e senza sponda
+    idraulica. La differenza e' l'importo netto della nota di credito."""
+    rows = load_shipments_from_db(db_path)
+    normalized_month = clean_text(month_key)
+    selected: list[tuple[date, dict[str, Any]]] = []
+    for row in rows:
+        if clean_text(row.get("Tipo Cliente")).upper() != CUSTOMER_TYPE_WHOLESALER:
+            continue
+        ref_date = billing_reference_date(row)
+        if ref_date is None or ref_date >= WHOLESALER_RULE_START:
+            continue
+        if normalized_month and f"{ref_date.year:04d}-{ref_date.month:02d}" != normalized_month:
+            continue
+        billed = to_float(row.get("Costo Attivo"))
+        if billed is None or billed <= 0:
+            continue
+        selected.append((ref_date, row))
+
+    if not selected:
+        label = normalized_month or f"i mesi precedenti a {WHOLESALER_RULE_START.strftime('%m/%Y')}"
+        raise ValueError(f"Nessuna spedizione di grossisti con attivo fatturato per {label}.")
+
+    active_rates_path = resolve_active_rates_path()
+    if active_rates_path is None:
+        raise ValueError("Tariffe attive non disponibili: impossibile ricalcolare l'attivo dei grossisti.")
+    corrected_rows = [copy.deepcopy(row) for _ref_date, row in selected]
+    engine_apply_tariffs_to_shipments(
+        corrected_rows,
+        active_rates_path=active_rates_path,
+        brt_extra_flags_path=BRT_EXTRA_FLAGS_PATH,
+        gdo_customers_path=available_gdo_customers_path(),
+        fuel_settings_path=available_fuel_settings_path(),
+        wholesaler_rule=lambda _row: True,
+    )
+
+    records: list[dict[str, Any]] = []
+    for (ref_date, old_row), new_row in zip(selected, corrected_rows):
+        billed = round(to_float(old_row.get("Costo Attivo")) or 0, 2)
+        corrected = to_float(new_row.get("Costo Attivo"))
+        if corrected is None:
+            continue
+        corrected = round(corrected, 2)
+        old_extras = parse_billing_extra_amounts(old_row.get("Extra Attivi Applicati"))
+        new_extras = parse_billing_extra_amounts(new_row.get("Extra Attivi Applicati"))
+        labels = set(old_extras) | set(new_extras)
+        removed = round(sum(max(old_extras.get(label, 0) - new_extras.get(label, 0), 0) for label in labels), 2)
+        added = round(sum(max(new_extras.get(label, 0) - old_extras.get(label, 0), 0) for label in labels), 2)
+        records.append({
+            "ref_date": ref_date,
+            "month": f"{ref_date.year:04d}-{ref_date.month:02d}",
+            "row": old_row,
+            "billed": billed,
+            "corrected": corrected,
+            "removed": removed,
+            "added": added,
+            "credit": round(billed - corrected, 2),
+            "old_extras": clean_text(old_row.get("Extra Attivi Applicati")),
+            "new_extras": clean_text(new_row.get("Extra Attivi Applicati")),
+        })
+    records.sort(key=lambda item: (
+        item["month"],
+        clean_text(item["row"].get("Route to Customer")),
+        item["ref_date"],
+        clean_text(item["row"].get("Shipment")),
+    ))
+
+    def totals_row(items: list[dict[str, Any]]) -> list[Any]:
+        return [
+            len(items),
+            round(sum(item["billed"] for item in items), 2),
+            round(sum(item["corrected"] for item in items), 2),
+            round(sum(item["removed"] for item in items), 2),
+            round(sum(item["added"] for item in items), 2),
+            round(sum(item["credit"] for item in items), 2),
+        ]
+
+    def style_total_row(sheet, row_index: int, color: str) -> None:
+        for cell in sheet[row_index]:
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill("solid", fgColor=color)
+
+    def add_table(sheet, name: str, style: str, stripes: bool) -> None:
+        table = Table(displayName=name, ref=f"A1:{get_column_letter(sheet.max_column)}{sheet.max_row}")
+        table.tableStyleInfo = TableStyleInfo(name=style, showRowStripes=stripes, showFirstColumn=False, showLastColumn=False)
+        sheet.add_table(table)
+
+    workbook = Workbook()
+    months_sheet = workbook.active
+    months_sheet.title = "Riepilogo mesi"
+    months_sheet.append([
+        "Mese",
+        "Spedizioni",
+        "Attivo fatturato",
+        "Attivo corretto",
+        "Extra GDO stornati",
+        "Extra grossista da addebitare",
+        "Nota di credito",
+    ])
+    by_month: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        by_month.setdefault(record["month"], []).append(record)
+    for month, items in sorted(by_month.items()):
+        months_sheet.append([month, *totals_row(items)])
+    month_total_row = months_sheet.max_row + 1
+    months_sheet.append(["Totale", *[sum_formula(column, month_total_row) for column in range(2, 8)]])
+    style_total_row(months_sheet, month_total_row, "DBEAFE")
+    _style_passive_sheet(months_sheet, money_columns=[3, 4, 5, 6, 7], numeric_columns=[2])
+    add_table(months_sheet, "NoteCreditoMesi", "TableStyleMedium2", True)
+
+    customers_sheet = workbook.create_sheet("Riepilogo clienti")
+    customers_sheet.append([
+        "Mese",
+        "Cliente",
+        "Spedizioni",
+        "Attivo fatturato",
+        "Attivo corretto",
+        "Extra GDO stornati",
+        "Extra grossista da addebitare",
+        "Nota di credito",
+    ])
+    by_month_customer: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in records:
+        customer = clean_text(record["row"].get("Route to Customer")) or "CLIENTE NON INDICATO"
+        by_month_customer.setdefault((record["month"], customer), []).append(record)
+    for (month, customer), items in sorted(by_month_customer.items()):
+        customers_sheet.append([month, customer, *totals_row(items)])
+    customers_total_row = customers_sheet.max_row + 1
+    customers_sheet.append(["Totale", "", *[sum_formula(column, customers_total_row) for column in range(3, 9)]])
+    style_total_row(customers_sheet, customers_total_row, "DBEAFE")
+    _style_passive_sheet(customers_sheet, money_columns=[4, 5, 6, 7, 8], numeric_columns=[3])
+    add_table(customers_sheet, "NoteCreditoClienti", "TableStyleMedium2", True)
+
+    detail_sheet = workbook.create_sheet("Dettaglio spedizioni")
+    detail_headers = [
+        "Mese",
+        "Data rif.",
+        "Shipment",
+        "Ordini",
+        "Cliente",
+        "Provincia",
+        "Servizio",
+        "Freight",
+        "Pallet fatturati",
+        "Attivo fatturato",
+        "Attivo corretto",
+        "Extra GDO stornati",
+        "Extra grossista da addebitare",
+        "Nota di credito",
+        "Extra fatturati",
+        "Extra corretti",
+        "Stato",
+    ]
+    detail_sheet.append(detail_headers)
+    for record in records:
+        row = record["row"]
+        detail_sheet.append([
+            record["month"],
+            record["ref_date"],
+            clean_text(row.get("Shipment")),
+            clean_text(row.get("Orders")),
+            clean_text(row.get("Route to Customer")),
+            clean_text(row.get("Provincia")),
+            clean_text(row.get("Service Level")),
+            clean_text(row.get("Freight Code")),
+            to_float(row.get("Pallet Fatturati")) or "",
+            record["billed"],
+            record["corrected"],
+            record["removed"],
+            record["added"],
+            record["credit"],
+            record["old_extras"],
+            record["new_extras"],
+            clean_text(row.get("Stato")),
+        ])
+    detail_total_row = detail_sheet.max_row + 1
+    detail_totals = [""] * len(detail_headers)
+    detail_totals[0] = "Totale"
+    for column in range(9, 15):
+        detail_totals[column - 1] = sum_formula(column, detail_total_row)
+    detail_sheet.append(detail_totals)
+    style_total_row(detail_sheet, detail_total_row, "ECFDF5")
+    for cell in detail_sheet["B"][1:]:
+        if isinstance(cell.value, date):
+            cell.number_format = "dd/mm/yyyy"
+    _style_passive_sheet(detail_sheet, money_columns=[10, 11, 12, 13, 14], numeric_columns=[9])
+    add_table(detail_sheet, "NoteCreditoDettaglio", "TableStyleMedium4", False)
+
+    notes_sheet = workbook.create_sheet("Criteri")
+    for line in (
+        "Spedizioni di clienti classificati GROSSISTA nell'anagrafica (gdo_customers.csv) con competenza precedente al "
+        f"{WHOLESALER_RULE_START.strftime('%d/%m/%Y')}, quando i grossisti erano trattati come GDO.",
+        "Attivo fatturato: calcolo con la vecchia regola (extra 'GDO delivery and time slot booking' +20%).",
+        "Attivo corretto: ricalcolo da grossista, senza extra GDO e senza sponda idraulica (salvo nota SPONDA in anagrafica); "
+        "restano gli altri extra (ETS, fuel, preavviso telefonico BKL, fixed time slot BKV, ecc.).",
+        "Nota di credito = Attivo fatturato - Attivo corretto. Un valore negativo indica un importo da addebitare.",
+        "Il ricalcolo usa le tariffe attive, l'indice ISTAT e il fuel mensile attualmente configurati nel programma: "
+        "se una fattura passata ha usato valori diversi, la differenza va verificata.",
+    ):
+        notes_sheet.append([line])
+    notes_sheet.column_dimensions["A"].width = 140
+    for cell in notes_sheet["A"]:
+        cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    downloads_dir.mkdir(parents=True, exist_ok=True)
+    suffix = normalized_month if normalized_month else "tutti_i_mesi"
+    output_path = downloads_dir / f"VTech_note_credito_grossisti_{suffix}.xlsx"
+    workbook.save(output_path)
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise OSError(f"Excel note di credito grossisti non creato correttamente: {output_path}")
     return output_path
 
 

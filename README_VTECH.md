@@ -160,7 +160,11 @@ L'anagrafica clienti GDO e:
 
 - `data/gdo_customers.csv`
 
-Le righe presenti vengono classificate automaticamente come `Cliente GDO = SI` e, se la spedizione passa da BRT, entrano negli extra BRT come consegna supermercati/GDO.
+Ogni riga ha la colonna `Tipo Cliente`: `GDO` (supermercati, catene, anche Prenatal Retail Group) oppure `GROSSISTA` (VTIT-WHOLESALERS, giocherie, GIPI, ecc., quelli che il cliente indica come `NO GDO`). Le righe `GDO` vengono classificate automaticamente come `Cliente GDO = SI` e, se la spedizione passa da BRT, entrano negli extra BRT come consegna supermercati/GDO.
+
+**Grossisti (dal 01/10/2026).** Per le spedizioni con competenza da ottobre 2026 i clienti `GROSSISTA` non sono piu' GDO: niente extra attivo `GDO delivery and time slot booking` +20%, niente extra passivo BRT `Consegna supermercati/GDO` e Macsped `GDO consegna D60`, niente sponda idraulica (attiva e passiva Macsped), salvo i grossisti con `SPONDA` nelle note di anagrafica (es. Ambrosino). Restano tutti gli altri extra gia' calcolati: preavviso telefonico sulle BKL, fixed time slot +20% sulle BKV, ETS, fuel, consegna tassativa Macsped, ecc. I mesi precedenti (fino a settembre 2026) restano calcolati come fatturato, cioe' con i grossisti trattati come GDO: la data di passaggio e' `WHOLESALER_RULE_START` in `tariff_engine.py` e la competenza e' la stessa usata dalla pagina `Fatturazione`. Al primo avvio il file `gdo_customers.csv` gia' presente sul server viene aggiornato con la colonna `Tipo Cliente` (le righe aggiunte a mano restano come GDO) e l'originale e' salvato in `gdo_customers_prima_grossisti.csv`.
+
+Il pulsante `Note di credito grossisti` in `Fatturazione` crea in `Download` l'Excel con tutte le spedizioni dei grossisti dei mesi fino a settembre: attivo fatturato (con extra GDO), attivo ricalcolato da grossista (senza extra GDO e senza sponda, con gli altri extra dovuti) e differenza, che e' l'importo netto della nota di credito. Fogli: riepilogo per mese, riepilogo per mese e cliente, dettaglio per spedizione, criteri usati. Il ricalcolo usa tariffe attive, indice ISTAT e fuel mensile attualmente configurati.
 
 Sull'attiva, i clienti GDO ricevono anche l'extra automatico `GDO delivery and time slot booking`: +20% sulla tariffa standard, come indicato nel foglio `Additional extra charges` del file tariffe attive. Se la spedizione e GDO e BKV, resta solo l'extra GDO perche include gia prenotazione, giorno di scarico e orario fisso.
 

@@ -1533,6 +1533,7 @@ function renderBilling() {
           <button id="saveFuelBtn" type="button">Salva fuel</button>
           <button class="primary" id="exportActiveBtn" type="button">Scarica fatturazione attiva</button>
           <button class="primary" id="exportPassiveBtn" type="button">Scarica passivo vettori</button>
+          <button id="exportCreditNotesBtn" type="button" title="Grossisti fatturati come GDO nei mesi fino a settembre 2026">Note di credito grossisti</button>
         </div>
       </div>
 
@@ -3299,6 +3300,22 @@ els.content.addEventListener("click", async (event) => {
       });
       applyData(payload.data, { renderPage: true, keepSelection: false });
       showToast("Fuel mensile salvato. Tariffe e grafici ricalcolati.");
+    } catch (error) {
+      showToast(error.message);
+    }
+    return;
+  }
+  if (event.target.matches("#exportCreditNotesBtn")) {
+    try {
+      // Tutti i mesi gia' fatturati con la vecchia regola, non solo il mese selezionato.
+      const payload = await api("/api/credit-notes-export", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      showToast(`Excel note di credito grossisti creato in Download: ${payload.file}. Clicca qui per aprirlo.`, {
+        openPath: payload.path,
+        downloadUrl: payload.downloadUrl || "",
+      });
     } catch (error) {
       showToast(error.message);
     }
