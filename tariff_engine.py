@@ -9,7 +9,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pypdf
 from openpyxl import load_workbook
@@ -276,10 +276,21 @@ def default_macsped_tariffs_path() -> Path | None:
     return None
 
 
+# Data dalla quale i clienti dell'anagrafica classificati GROSSISTA (VTIT-WHOLESALERS,
+# giocherie, ecc.) non sono piu' trattati come GDO. I mesi precedenti restano calcolati
+# con la vecchia regola (tutti GDO) perche' coincidono con quanto gia' fatturato; la
+# differenza per le note di credito si legge dall'export dedicato.
+WHOLESALER_RULE_START = date(2026, 10, 1)
+CUSTOMER_TYPE_GDO = "GDO"
+CUSTOMER_TYPE_WHOLESALER = "GROSSISTA"
+WHOLESALER_TYPE_VALUES = {"GROSSISTA", "GROSSISTI", "NO GDO", "WHOLESALER", "WHOLESALERS"}
+
+
 @dataclass(frozen=True)
 class GdoCustomerMatch:
     label: str
     active_tail_lift: bool = False
+    customer_type: str = CUSTOMER_TYPE_GDO
 
 
 @dataclass(frozen=True)
@@ -311,9 +322,18 @@ def load_gdo_customer_registry(path: Path | None) -> GdoCustomerRegistry | None:
     with path.open("r", newline="", encoding="utf-8-sig") as file:
         reader = csv.DictReader(file)
         for row in reader:
-            enabled = clean_text(row.get("GDO") or row.get("gdo") or "SI").upper()
-            if enabled and enabled not in TRUE_VALUES:
-                continue
+            type_value = clean_text(row.get("Tipo Cliente") or row.get("tipo cliente")).upper()
+            if type_value:
+                # Anagrafica con distinzione GDO / grossista: la colonna "Tipo Cliente"
+                # decide la classe (PRG e simili restano GDO).
+                customer_type = (
+                    CUSTOMER_TYPE_WHOLESALER if type_value in WHOLESALER_TYPE_VALUES else CUSTOMER_TYPE_GDO
+                )
+            else:
+                enabled = clean_text(row.get("GDO") or row.get("gdo") or "SI").upper()
+                if enabled and enabled not in TRUE_VALUES:
+                    continue
+                customer_type = CUSTOMER_TYPE_GDO
 
             customer = next((clean_text(row.get(column)) for column in customer_columns if clean_text(row.get(column))), "")
             address = next((clean_text(row.get(column)) for column in address_columns if clean_text(row.get(column))), "")
@@ -326,6 +346,7 @@ def load_gdo_customer_registry(path: Path | None) -> GdoCustomerRegistry | None:
             match = GdoCustomerMatch(
                 label=label,
                 active_tail_lift="SPONDA" in normalize_registry_text(notes),
+                customer_type=customer_type,
             )
 
             def add_match(index: dict[str, GdoCustomerMatch], key: str) -> None:
@@ -777,6 +798,13 @@ def is_gdo_customer(row: dict[str, Any] | None) -> bool:
     ).upper() in TRUE_VALUES
 
 
+def is_wholesaler_customer(row: dict[str, Any] | None) -> bool:
+    """Grossista dell'anagrafica con la nuova regola attiva (non GDO, niente sponda)."""
+    if not row:
+        return False
+    return clean_text(row.get("Cliente Grossista")).upper() in TRUE_VALUES
+
+
 def is_active_urgent(row: dict[str, Any] | None) -> bool:
     if not row:
         return False
@@ -796,7 +824,8 @@ def is_groupage_active_shipment(row: dict[str, Any] | None) -> bool:
 def requires_active_tail_lift(row: dict[str, Any] | None, is_gdo: bool, is_amazon: bool) -> bool:
     if not is_groupage_active_shipment(row) or is_amazon:
         return False
-    if not is_gdo:
+    # GDO e grossisti non pagano la sponda, salvo quelli con nota SPONDA in anagrafica.
+    if not is_gdo and not is_wholesaler_customer(row):
         return True
     return clean_text((row or {}).get("Attiva Sponda")).upper() in TRUE_VALUES
 
@@ -1429,10 +1458,11 @@ class MacspedPassiveRateCard:
 
         # Sponda idraulica: stessa regola gia' usata per l'attiva BRT groupage
         # (requires_active_tail_lift) - tutte le groupage, esclusi Amazon ed
-        # esclusi i GDO a meno che non abbiano "Attiva Sponda" (anagrafica GDO
-        # con nota SPONDA). Nessuna spunta manuale da fare.
+        # esclusi i GDO e i grossisti a meno che non abbiano "Attiva Sponda"
+        # (anagrafica con nota SPONDA). Nessuna spunta manuale da fare.
         sponda_flag = clean_text((shipment_row or {}).get("Attiva Sponda")).upper() in TRUE_VALUES
-        if not amazon and (not gdo_flagged or sponda_flag):
+        wholesaler = is_wholesaler_customer(shipment_row)
+        if not amazon and ((not gdo_flagged and not wholesaler) or sponda_flag):
             extras.append(("Sponda idraulica", 20.00))
 
         # Extra da condizioni accessorie Macsped, attivabili a spedizione tramite
@@ -1723,7 +1753,14 @@ def apply_tariffs_to_shipments(
     brt_extra_flags_path: Path | None = None,
     gdo_customers_path: Path | None = None,
     fuel_settings_path: Path | None = None,
+    wholesaler_rule: Callable[[dict[str, Any]], bool] | None = None,
 ) -> None:
+    """Calcola attivo/passivo di ogni spedizione.
+
+    `wholesaler_rule(row)` stabilisce se per quella spedizione vale la distinzione
+    GDO / grossista (True) o la vecchia regola in cui ogni cliente dell'anagrafica
+    e' GDO (False). Senza funzione la distinzione vale sempre.
+    """
     active_card = ActiveRateCard.from_excel(active_rates_path) if active_rates_path else None
     brt_card = BrtPassiveRateCard.from_pdf(brt_passive_pdf_path) if brt_passive_pdf_path else None
     carrier_rate_card = CarrierPalletRateCard.from_csv(default_carrier_tariffs_path())
@@ -1741,11 +1778,18 @@ def apply_tariffs_to_shipments(
 
         gdo_match = match_gdo_customer(row, gdo_registry)
         if gdo_match:
-            row["Cliente GDO"] = "SI"
+            is_wholesaler = gdo_match.customer_type == CUSTOMER_TYPE_WHOLESALER and (
+                wholesaler_rule is None or wholesaler_rule(row)
+            )
+            row["Tipo Cliente"] = gdo_match.customer_type
+            row["Cliente Grossista"] = "SI" if is_wholesaler else ""
+            row["Cliente GDO"] = "" if is_wholesaler else "SI"
             row["Cliente GDO Fonte"] = gdo_match.label
-            row["Supermercati GDO"] = "SI"
+            row["Supermercati GDO"] = "" if is_wholesaler else "SI"
             row["Attiva Sponda"] = "SI" if gdo_match.active_tail_lift else ""
         else:
+            row["Tipo Cliente"] = ""
+            row["Cliente Grossista"] = ""
             row["Cliente GDO"] = ""
             row["Cliente GDO Fonte"] = ""
             row["Supermercati GDO"] = ""

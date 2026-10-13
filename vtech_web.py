@@ -49,6 +49,7 @@ from vtech_app import (
     delete_shipments_permanently,
     display_value,
     export_active_billing_report,
+    export_wholesaler_credit_notes,
     export_passive_billing_by_carrier,
     export_planned_shipments,
     find_outbound_reports,
@@ -161,6 +162,7 @@ ADMIN_POST_PATHS = {"/api/users"}
 BILLING_POST_PATHS = {
     "/api/passive-export",
     "/api/active-export",
+    "/api/credit-notes-export",
     "/api/fuel-settings",
     "/api/open-path",
 }
@@ -537,6 +539,7 @@ def load_gdo_customer_records() -> list[dict[str, str]]:
         "Shipping Information",
         "Note Scarico",
         "GDO",
+        "Tipo Cliente",
     ]
     with path.open("r", newline="", encoding="utf-8-sig") as file:
         reader = csv.DictReader(file)
@@ -1732,6 +1735,9 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/active-export":
                 self._handle_active_export(body, user)
                 return
+            if parsed.path == "/api/credit-notes-export":
+                self._handle_credit_notes_export(body, user)
+                return
             if parsed.path == "/api/fuel-settings":
                 self._handle_fuel_settings(body, user)
                 return
@@ -2022,6 +2028,17 @@ class VTechWebHandler(BaseHTTPRequestHandler):
     def _handle_active_export(self, body: dict[str, Any], user: dict[str, str]) -> None:
         month = clean_text(body.get("month"))
         output_path = export_active_billing_report(month or None)
+        self._send_json({
+            "ok": True,
+            "file": output_path.name,
+            "path": str(output_path),
+            "downloadUrl": download_url_for_path(output_path),
+            "data": grouped_shipments(user),
+        })
+
+    def _handle_credit_notes_export(self, body: dict[str, Any], user: dict[str, str]) -> None:
+        month = clean_text(body.get("month"))
+        output_path = export_wholesaler_credit_notes(month or None)
         self._send_json({
             "ok": True,
             "file": output_path.name,
