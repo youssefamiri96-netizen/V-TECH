@@ -223,7 +223,7 @@ def csv_has_column(path: Path, column: str) -> bool:
     try:
         with path.open("r", newline="", encoding="utf-8-sig") as file:
             return column in (csv.DictReader(file).fieldnames or [])
-    except OSError:
+    except (OSError, UnicodeDecodeError, csv.Error):
         return False
 
 
@@ -233,42 +233,64 @@ def migrate_gdo_customers_to_wholesaler_split() -> None:
 
     Il file in DATA_DIR non viene mai sovrascritto dal seed, quindi senza questo
     passaggio i server gia' attivi continuerebbero a trattare i grossisti come GDO.
-    Le righe del seed vincono; le righe presenti solo nel file vecchio (aggiunte a
-    mano) restano come GDO, che era l'unico significato che avevano. Prima di
-    scrivere si salva una copia del file originale.
-    """
-    seed = SEED_DIR / "gdo_customers.csv"
-    target = GDO_CUSTOMERS_PATH
-    if not seed.exists() or not target.exists() or seed.resolve() == target.resolve():
-        return
-    if csv_has_column(target, "Tipo Cliente") or not csv_has_column(seed, "Tipo Cliente"):
-        return
+    Le righe gia' presenti nel file locale restano quelle locali (note comprese):
+    si aggiunge solo il tipo preso dal seed; le righe del seed mancanti vengono
+    aggiunte; le righe solo locali restano GDO, o escluse se avevano GDO=NO. Prima di
+    scrivere si salva una copia dell'originale e il file viene sostituito in modo
+    atomico. In caso di problemi il file non viene toccato e l'avvio prosegue."""
+    try:
+        seed = SEED_DIR / "gdo_customers.csv"
+        target = GDO_CUSTOMERS_PATH
+        if not seed.exists() or not target.exists() or seed.resolve() == target.resolve():
+            return
+        if csv_has_column(target, "Tipo Cliente") or not csv_has_column(seed, "Tipo Cliente"):
+            return
 
-    def read_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
-        with path.open("r", newline="", encoding="utf-8-sig") as file:
-            reader = csv.DictReader(file)
-            return list(reader.fieldnames or []), list(reader)
+        def read_rows(path: Path) -> tuple[list[str], list[dict[str, str]]]:
+            with path.open("r", newline="", encoding="utf-8-sig") as file:
+                reader = csv.DictReader(file)
+                return list(reader.fieldnames or []), list(reader)
 
-    seed_fields, seed_rows = read_rows(seed)
-    _target_fields, target_rows = read_rows(target)
-    seed_keys = {(clean_text(r.get("Codice Cliente")), clean_text(r.get("Ship To Location"))) for r in seed_rows}
-    merged = list(seed_rows)
-    for row in target_rows:
-        key = (clean_text(row.get("Codice Cliente")), clean_text(row.get("Ship To Location")))
-        if key in seed_keys:
-            continue
-        legacy_row = {field: row.get(field, "") for field in seed_fields}
-        legacy_row["GDO"] = "SI"
-        legacy_row["Tipo Cliente"] = "GDO"
-        merged.append(legacy_row)
+        seed_fields, seed_rows = read_rows(seed)
+        target_fields, target_rows = read_rows(target)
+        if not set(seed_fields) <= set(target_fields) | {"Tipo Cliente"}:
+            # Intestazioni diverse da quelle del seed: non si indovina, il file resta com'e'.
+            print("gdo_customers.csv: intestazioni non riconosciute, migrazione Tipo Cliente saltata.")
+            return
 
-    backup = target.with_name("gdo_customers_prima_grossisti.csv")
-    if not backup.exists():
-        shutil.copyfile(target, backup)
-    with target.open("w", newline="", encoding="utf-8-sig") as file:
-        writer = csv.DictWriter(file, fieldnames=seed_fields, lineterminator="\r\n")
-        writer.writeheader()
-        writer.writerows(merged)
+        def row_key(row: dict[str, str]) -> tuple[str, str]:
+            return clean_text(row.get("Codice Cliente")), clean_text(row.get("Ship To Location"))
+
+        seed_by_key = {row_key(row): row for row in seed_rows}
+        merged: list[dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in target_rows:
+            key = row_key(row)
+            seen.add(key)
+            merged_row = {field: row.get(field, "") for field in seed_fields}
+            seed_row = seed_by_key.get(key)
+            if seed_row is not None:
+                merged_row["Tipo Cliente"] = seed_row.get("Tipo Cliente", "")
+                merged_row["GDO"] = seed_row.get("GDO", merged_row.get("GDO", ""))
+            elif clean_text(row.get("GDO")).upper() in {"", "SI", "S", "TRUE", "1", "YES", "Y"}:
+                merged_row["GDO"] = "SI"
+                merged_row["Tipo Cliente"] = "GDO"
+            # Riga solo locale con GDO=NO: era esclusa dal calcolo, resta esclusa
+            # (Tipo Cliente vuoto, il loader guarda la colonna GDO).
+            merged.append(merged_row)
+        merged.extend(row for key, row in seed_by_key.items() if key not in seen)
+
+        backup = target.with_name("gdo_customers_prima_grossisti.csv")
+        if not backup.exists():
+            shutil.copyfile(target, backup)
+        temp_path = target.with_name(target.name + ".tmp")
+        with temp_path.open("w", newline="", encoding="utf-8-sig") as file:
+            writer = csv.DictWriter(file, fieldnames=seed_fields, lineterminator="\r\n")
+            writer.writeheader()
+            writer.writerows(merged)
+        os.replace(temp_path, target)
+    except Exception as exc:  # l'avvio dell'app non deve dipendere dalla migrazione
+        print(f"gdo_customers.csv: migrazione Tipo Cliente non riuscita ({exc}).")
 
 
 ensure_seed_data_files()

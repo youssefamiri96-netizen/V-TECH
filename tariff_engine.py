@@ -293,10 +293,17 @@ class GdoCustomerMatch:
     customer_type: str = CUSTOMER_TYPE_GDO
 
 
+# Il report V-Tech tronca "Route to Customer" a 30 caratteri: i clienti con ragione
+# sociale piu' lunga non matchano per nome intero e vanno cercati per prefisso.
+REPORT_CUSTOMER_NAME_MAX_CHARS = 30
+TRUNCATED_NAME_MIN_PREFIX_CHARS = 20
+
+
 @dataclass(frozen=True)
 class GdoCustomerRegistry:
     customer_keys: dict[str, GdoCustomerMatch]
     address_keys: dict[str, GdoCustomerMatch]
+    full_names: tuple[tuple[str, GdoCustomerMatch], ...] = ()
 
 
 def load_gdo_customer_registry(path: Path | None) -> GdoCustomerRegistry | None:
@@ -305,6 +312,7 @@ def load_gdo_customer_registry(path: Path | None) -> GdoCustomerRegistry | None:
 
     customer_keys: dict[str, GdoCustomerMatch] = {}
     address_keys: dict[str, GdoCustomerMatch] = {}
+    full_names: list[tuple[str, GdoCustomerMatch]] = []
     customer_columns = [
         "Ragione Sociale",
         "RAGIONESOCIALE",
@@ -358,13 +366,39 @@ def load_gdo_customer_registry(path: Path | None) -> GdoCustomerRegistry | None:
                 add_match(customer_keys, key)
             for key in customer_match_keys(address):
                 add_match(address_keys, key)
+            normalized_name = normalize_registry_text(customer)
+            if len(clean_text(customer)) > REPORT_CUSTOMER_NAME_MAX_CHARS and normalized_name:
+                full_names.append((normalized_name, match))
 
-    return GdoCustomerRegistry(customer_keys=customer_keys, address_keys=address_keys)
+    return GdoCustomerRegistry(
+        customer_keys=customer_keys,
+        address_keys=address_keys,
+        full_names=tuple(full_names),
+    )
+
+
+def match_truncated_customer(
+    candidate: str,
+    registry: GdoCustomerRegistry,
+) -> GdoCustomerMatch | None:
+    """Cliente con nome troncato a 30 caratteri dal report: si cerca per prefisso tra
+    i nomi lunghi dell'anagrafica, accettando solo un risultato non ambiguo."""
+    text = clean_text(candidate)
+    if len(text) < REPORT_CUSTOMER_NAME_MAX_CHARS:
+        return None
+    prefix = normalize_registry_text(text)
+    if len(prefix) < TRUNCATED_NAME_MIN_PREFIX_CHARS:
+        return None
+    found = {name: match for name, match in registry.full_names if name.startswith(prefix)}
+    if len({(match.customer_type, match.label) for match in found.values()}) != 1:
+        return None
+    return next(iter(found.values()))
 
 
 def match_gdo_customer(
     shipment_row: dict[str, Any],
     registry: GdoCustomerRegistry | None,
+    allow_truncated: bool = False,
 ) -> GdoCustomerMatch | None:
     if not registry:
         return None
@@ -390,6 +424,13 @@ def match_gdo_customer(
             for key in customer_match_keys(candidate):
                 if key in registry.address_keys:
                     return registry.address_keys[key]
+
+    if allow_truncated:
+        for value in customer_values:
+            for candidate in iter_registry_values(value):
+                truncated_match = match_truncated_customer(candidate, registry)
+                if truncated_match:
+                    return truncated_match
 
     return None
 
@@ -1776,11 +1817,12 @@ def apply_tariffs_to_shipments(
         selected_carrier = clean_text(row.get("Carrier Scelto")).upper()
         active_fuel_rate, passive_fuel_rate = fuel_settings_for_row(row, fuel_settings)
 
-        gdo_match = match_gdo_customer(row, gdo_registry)
+        wholesaler_rule_on = wholesaler_rule is None or wholesaler_rule(row)
+        # Il match per prefisso dei nomi troncati vale solo con la nuova regola: sui
+        # mesi gia' fatturati quei clienti non erano riconosciuti e restano com'erano.
+        gdo_match = match_gdo_customer(row, gdo_registry, allow_truncated=wholesaler_rule_on)
         if gdo_match:
-            is_wholesaler = gdo_match.customer_type == CUSTOMER_TYPE_WHOLESALER and (
-                wholesaler_rule is None or wholesaler_rule(row)
-            )
+            is_wholesaler = gdo_match.customer_type == CUSTOMER_TYPE_WHOLESALER and wholesaler_rule_on
             row["Tipo Cliente"] = gdo_match.customer_type
             row["Cliente Grossista"] = "SI" if is_wholesaler else ""
             row["Cliente GDO"] = "" if is_wholesaler else "SI"
