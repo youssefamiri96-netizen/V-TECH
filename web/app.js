@@ -1505,6 +1505,8 @@ function renderBilling() {
   const trendTitle = months.length > 1 ? "Andamento mese per mese" : "Andamento del mese";
   const fuelSettings = state.data?.fuelSettings?.[state.billingMonth] || {};
   const activeFuel = fuelSettings.active ?? 0;
+  // Dal 01/10/2026 il fuel non si applica piu' all'attivo (resta solo sul passivo).
+  const activeFuelOff = state.billingMonth >= "2026-10";
   const passiveFuel = fuelSettings.passive ?? 2;
 
   els.content.innerHTML = `
@@ -1523,8 +1525,8 @@ function renderBilling() {
             </select>
           </label>
           <label class="billing-filter fuel-field">
-            <span>Fuel attivo %</span>
-            <input id="billingActiveFuel" inputmode="decimal" value="${escapeHtml(String(activeFuel).replace(".", ","))}" />
+            <span>${activeFuelOff ? "Fuel attivo % (non applicato)" : "Fuel attivo %"}</span>
+            <input id="billingActiveFuel" inputmode="decimal" value="${escapeHtml(String(activeFuel).replace(".", ","))}" ${activeFuelOff ? 'disabled title="Dal 01/10/2026 il fuel non si applica all\'attivo"' : ""} />
           </label>
           <label class="billing-filter fuel-field">
             <span>Fuel passivo %</span>

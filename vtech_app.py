@@ -752,6 +752,7 @@ def wholesaler_rule_applies(row: dict[str, Any]) -> bool:
 
 def apply_tariffs_to_shipments(shipment_rows: list[dict[str, Any]], **kwargs: Any) -> None:
     kwargs.setdefault("wholesaler_rule", wholesaler_rule_applies)
+    kwargs.setdefault("pricing_rule", wholesaler_rule_applies)
     engine_apply_tariffs_to_shipments(shipment_rows, **kwargs)
 
 
@@ -3942,6 +3943,20 @@ def export_wholesaler_credit_notes(
     active_rates_path = resolve_active_rates_path()
     if active_rates_path is None:
         raise ValueError("Tariffe attive non disponibili: impossibile ricalcolare l'attivo.")
+    # "Fatturato": come era calcolato (e fatturato) fino a settembre, compreso il vecchio doppio
+    # extra Amazon (BKL | BKV = +80%) che oggi e' corretto a +40%.
+    old_rows = [copy.deepcopy(row) for _ref_date, row in selected]
+    for old_row in old_rows:
+        old_row["Amazon Extra Cumulati"] = "SI"
+    apply_tariffs_to_shipments(
+        old_rows,
+        active_rates_path=active_rates_path,
+        brt_extra_flags_path=BRT_EXTRA_FLAGS_PATH,
+        gdo_customers_path=available_gdo_customers_path(),
+        fuel_settings_path=available_fuel_settings_path(),
+    )
+    # "Dovuto": regole di oggi per clienti, DKV, sponda e Amazon; il prezzo resta quello dei mesi
+    # fatturati (fuel e camion come allora), cosi' la differenza dipende solo da queste regole.
     corrected_rows = [copy.deepcopy(row) for _ref_date, row in selected]
     engine_apply_tariffs_to_shipments(
         corrected_rows,
@@ -3950,12 +3965,14 @@ def export_wholesaler_credit_notes(
         gdo_customers_path=available_gdo_customers_path(),
         fuel_settings_path=available_fuel_settings_path(),
         wholesaler_rule=lambda _row: True,
+        pricing_rule=lambda _row: False,
     )
 
     TYPE_GDO = "Storno grossista"
     TYPE_DKV = "DKV non addebitata"
+    TYPE_AMAZON = "Amazon extra doppio"
     records: list[dict[str, Any]] = []
-    for (ref_date, old_row), new_row in zip(selected, corrected_rows):
+    for (ref_date, _loaded_row), old_row, new_row in zip(selected, old_rows, corrected_rows):
         billed = round(to_float(old_row.get("Costo Attivo")) or 0, 2)
         corrected = to_float(new_row.get("Costo Attivo"))
         if corrected is None:
@@ -3987,15 +4004,18 @@ def export_wholesaler_credit_notes(
                 credit=credit,
             )
         elif not old_is_gdo and not new_is_gdo:
-            dkv_amount = round(new_extras.get("DKV data tassativa", 0), 2)
-            if dkv_amount <= 0:
+            # Cliente normale con le regole di oggi come con quelle di allora: le uniche differenze
+            # possibili sono la DKV mai addebitata (da addebitare) e il doppio extra Amazon (da stornare).
+            credit = round(billed - corrected, 2)
+            if abs(credit) < 0.005:
                 continue
+            labels = set(old_extras) | set(new_extras)
             record.update(
-                kind=TYPE_DKV,
-                corrected=round(billed + dkv_amount, 2),
-                removed=0.0,
-                added=dkv_amount,
-                credit=round(-dkv_amount, 2),
+                kind=TYPE_DKV if credit < 0 else TYPE_AMAZON,
+                corrected=corrected,
+                removed=round(sum(max(old_extras.get(label, 0) - new_extras.get(label, 0), 0) for label in labels), 2),
+                added=round(sum(max(new_extras.get(label, 0) - old_extras.get(label, 0), 0) for label in labels), 2),
+                credit=credit,
             )
         else:
             continue  # GDO anche con le regole di oggi: nessuna differenza da stornare
@@ -4025,25 +4045,24 @@ def export_wholesaler_credit_notes(
     months_sheet.title = "Note di credito"
     months_sheet.append([
         "Mese",
-        "Spedizioni storno grossisti",
         "Storno grossisti",
-        "Spedizioni DKV",
+        "Storno Amazon (extra doppio)",
         "DKV da addebitare",
         "Nota di credito netta",
+        "Spedizioni",
     ])
     by_month: dict[str, list[dict[str, Any]]] = {}
     for record in records:
         by_month.setdefault(record["month"], []).append(record)
     for month, items in sorted(by_month.items()):
-        gdo_items = [item for item in items if item["kind"] == TYPE_GDO]
-        dkv_items = [item for item in items if item["kind"] == TYPE_DKV]
-        gdo_total = round(sum(item["credit"] for item in gdo_items), 2)
-        dkv_total = round(-sum(item["credit"] for item in dkv_items), 2)
-        months_sheet.append([month, len(gdo_items), gdo_total, len(dkv_items), dkv_total, round(gdo_total - dkv_total, 2)])
+        gdo_total = round(sum(item["credit"] for item in items if item["kind"] == TYPE_GDO), 2)
+        amazon_total = round(sum(item["credit"] for item in items if item["kind"] == TYPE_AMAZON), 2)
+        dkv_total = round(-sum(item["credit"] for item in items if item["kind"] == TYPE_DKV), 2)
+        months_sheet.append([month, gdo_total, amazon_total, dkv_total, round(gdo_total + amazon_total - dkv_total, 2), len(items)])
     month_total_row = months_sheet.max_row + 1
     months_sheet.append(["Totale", *[sum_formula(column, month_total_row) for column in range(2, 7)]])
     style_total_row(months_sheet, month_total_row, "DBEAFE")
-    _style_passive_sheet(months_sheet, money_columns=[3, 5, 6], numeric_columns=[2, 4])
+    _style_passive_sheet(months_sheet, money_columns=[2, 3, 4, 5], numeric_columns=[6])
     add_table(months_sheet, "NoteCredito", "TableStyleMedium2", True)
 
     detail_sheet = workbook.create_sheet("Dettaglio")

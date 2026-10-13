@@ -140,6 +140,7 @@ BANCALI_A_PERDERE_EXTRA_WEIGHT_KG = BANCALI_A_PERDERE_WEIGHT_KG - BANCALI_REPORT
 BANCALI_SLOT_VOLUME_M3 = 1.20 * 0.80 * 1.20
 BANCALI_DECIMAL_EPSILON = 0.001
 ACTIVE_ETS_REGIONS = {"SICILIA", "SARDEGNA"}
+FTL_MAX_PALLETS = 33  # pallet massimi su un camion completo
 SLA_CUTOFF = time(12, 30)
 SLA_PREP_WITHIN_CUTOFF_HOURS = 48
 SLA_PREP_AFTER_CUTOFF_HOURS = 72
@@ -1149,9 +1150,16 @@ def active_extra_charges(
     if row_has_any_true(shipment_row, ("2nd delivery", "Seconda Consegna", "Returns", "Reso", "Riconsegna")):
         add_percent("2nd delivery and returns", settings.second_delivery_returns_percent)
 
+    # Amazon: il +40% (fix day / time slot) si addebita una sola volta, anche con codici misti
+    # (BKL | BKV). L'interruttore "Amazon Extra Cumulati" riproduce il vecchio calcolo (80%) e
+    # serve solo all'export delle note di credito per ricostruire quanto era stato fatturato.
+    amazon_extra_added = False
+    stack_amazon_extras = clean_text((shipment_row or {}).get("Amazon Extra Cumulati")).upper() in TRUE_VALUES
+
     if has_freight_code(shipment_row, "BKV") and not is_gdo:
         if is_amazon:
             add_percent("BKV Amazon / fixed time slot", settings.amazon_fixed_time_slot_percent)
+            amazon_extra_added = True
         else:
             add_percent("BKV fixed time slot", settings.fixed_time_slot_percent)
 
@@ -1166,10 +1174,11 @@ def active_extra_charges(
     ):
         if is_amazon:
             add_percent("DKV Amazon / data tassativa", settings.amazon_dkv_percent)
+            amazon_extra_added = True
         else:
             add_percent("DKV data tassativa", settings.dkv_percent)
 
-    if has_freight_code(shipment_row, "BKL") and is_amazon:
+    if has_freight_code(shipment_row, "BKL") and is_amazon and (stack_amazon_extras or not amazon_extra_added):
         add_percent("Amazon BKL fix day delivery and time slot booking", settings.amazon_bkl_percent)
 
     if requires_active_tail_lift(shipment_row, is_gdo, is_amazon):
@@ -1339,6 +1348,7 @@ class ActiveRateCard:
         pallets: Any,
         shipment_row: dict[str, Any] | None = None,
         active_fuel_rate: float | None = None,
+        split_ftl: bool = False,
     ) -> ActiveRateResult | None:
         province_code = clean_text(province).upper()
         row = self.rates_by_province.get(province_code)
@@ -1348,16 +1358,35 @@ class ActiveRateCard:
 
         # Tolleranza minima per il rumore dei float (8.0000000000004 pallet non sono 9).
         billed_pallets = max(1, math.ceil(pallet_value - 1e-6))
-        if billed_pallets <= 8:
-            column = f"{billed_pallets} pallet"
-        elif billed_pallets <= 15:
-            column = "Small truck up to 15 pallet"
-        else:
-            column = "FTL"
 
-        cost = to_float(row.get(column))
-        if cost is None:
-            return None
+        def price_for(pallet_count: int) -> tuple[str, float | None]:
+            if pallet_count <= 8:
+                label_column = f"{pallet_count} pallet"
+            elif pallet_count <= 15:
+                label_column = "Small truck up to 15 pallet"
+            else:
+                label_column = "FTL"
+            return label_column, to_float(row.get(label_column))
+
+        if split_ftl and billed_pallets > FTL_MAX_PALLETS:
+            # Oltre 33 pallet serve piu' di un camion: un FTL per ogni 33 pallet pieni e il resto
+            # prezzato in base ai suoi pallet (stessa tabella).
+            full_trucks, remainder = divmod(billed_pallets, FTL_MAX_PALLETS)
+            ftl_cost = to_float(row.get("FTL"))
+            if ftl_cost is None:
+                return None
+            cost = ftl_cost * full_trucks
+            column = f"{full_trucks} FTL da {FTL_MAX_PALLETS} pallet"
+            if remainder:
+                remainder_column, remainder_cost = price_for(remainder)
+                if remainder_cost is None:
+                    return None
+                cost += remainder_cost
+                column += f" + {remainder} pallet ({remainder_column})"
+        else:
+            column, cost = price_for(billed_pallets)
+            if cost is None:
+                return None
 
         raw_base_cost = round(cost, 2)
         # Gli extra vengono calcolati sul nolo base NON indicizzato (percentuali e
@@ -2096,12 +2125,17 @@ def apply_tariffs_to_shipments(
     gdo_customers_path: Path | None = None,
     fuel_settings_path: Path | None = None,
     wholesaler_rule: Callable[[dict[str, Any]], bool] | None = None,
+    pricing_rule: Callable[[dict[str, Any]], bool] | None = None,
 ) -> None:
     """Calcola attivo/passivo di ogni spedizione.
 
     `wholesaler_rule(row)` stabilisce se per quella spedizione vale la distinzione
     GDO / grossista (True) o la vecchia regola in cui ogni cliente dell'anagrafica
     e' GDO (False). Senza funzione la distinzione vale sempre.
+
+    `pricing_rule(row)` stabilisce se per quella spedizione valgono le regole di prezzo dal
+    01/10/2026 (niente fuel attivo, FTL spezzati oltre 33 pallet). Senza funzione segue
+    `wholesaler_rule`.
     """
     active_card = ActiveRateCard.from_excel(active_rates_path) if active_rates_path else None
     brt_card = BrtPassiveRateCard.from_pdf(brt_passive_pdf_path) if brt_passive_pdf_path else None
@@ -2121,6 +2155,11 @@ def apply_tariffs_to_shipments(
 
         wholesaler_rule_on = wholesaler_rule is None or wholesaler_rule(row)
         row["Regola Grossisti"] = "SI" if wholesaler_rule_on else ""
+        effective_pricing_rule = pricing_rule if pricing_rule is not None else wholesaler_rule
+        pricing_rule_on = effective_pricing_rule is None or effective_pricing_rule(row)
+        row["Regola Tariffa"] = "SI" if pricing_rule_on else ""
+        if pricing_rule_on:
+            active_fuel_rate = None  # dal 01/10/2026 niente fuel sull'attivo
         if wholesaler_rule_on:
             # Dal 01/10/2026: riconoscimento per nome (anche scritto in modo diverso),
             # CAP e catena, vedi match_customer.
@@ -2165,6 +2204,7 @@ def apply_tariffs_to_shipments(
                 row.get("Theoretical Pallets"),
                 shipment_row=row,
                 active_fuel_rate=active_fuel_rate,
+                split_ftl=pricing_rule_on,
             )
             if active_card
             else None
