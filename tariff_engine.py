@@ -1098,9 +1098,8 @@ class ActiveExtraSettings:
     tail_lift_groupage: float = 10.00
     fixed_time_slot_percent: float = 0.20
     amazon_fixed_time_slot_percent: float = 0.40
-    # DKV (data di consegna tassativa): il contratto NON ha una voce dedicata. Per ora e'
-    # assunta uguale al fixed time slot (+20%, Amazon +40%); cambiare qui se il cliente
-    # indica un importo diverso.
+    # DKV (data di consegna tassativa) = "Fixed time slot" del contratto: +20% sulle tariffe
+    # standard, Amazon +40% (confermato dall'utente).
     dkv_percent: float = 0.20
     amazon_dkv_percent: float = 0.40
     phone_preadvise: float = 5.00
