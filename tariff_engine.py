@@ -1097,6 +1097,11 @@ class ActiveExtraSettings:
     tail_lift_groupage: float = 10.00
     fixed_time_slot_percent: float = 0.20
     amazon_fixed_time_slot_percent: float = 0.40
+    # DKV (data di consegna tassativa): il contratto NON ha una voce dedicata. Per ora e'
+    # assunta uguale al fixed time slot (+20%, Amazon +40%); cambiare qui se il cliente
+    # indica un importo diverso.
+    dkv_percent: float = 0.20
+    amazon_dkv_percent: float = 0.40
     phone_preadvise: float = 5.00
     waiting_time_hour: float = 0.0
     ets_sicily_sardinia_percent: float = 0.05
@@ -1160,9 +1165,9 @@ def active_extra_charges(
         and not is_gdo
     ):
         if is_amazon:
-            add_percent("DKV Amazon / data tassativa", settings.amazon_fixed_time_slot_percent)
+            add_percent("DKV Amazon / data tassativa", settings.amazon_dkv_percent)
         else:
-            add_percent("DKV data tassativa / fixed time slot", settings.fixed_time_slot_percent)
+            add_percent("DKV data tassativa", settings.dkv_percent)
 
     if has_freight_code(shipment_row, "BKL") and is_amazon:
         add_percent("Amazon BKL fix day delivery and time slot booking", settings.amazon_bkl_percent)
