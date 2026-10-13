@@ -852,7 +852,7 @@ def parse_active_extra_settings(wb: Any) -> ActiveExtraSettings:
             settings.phone_preadvise = amount
         elif "waiting time" in normalized and amount is not None:
             settings.waiting_time_hour = amount
-        elif "ets" in normalized and percent is not None:
+        elif re.search(r"\bets\b", normalized) and percent is not None:
             settings.ets_sicily_sardinia_percent = percent
         elif "fix day delivery" in normalized and "amazon" in normalized and percent is not None:
             settings.amazon_bkl_percent = percent
@@ -1236,6 +1236,39 @@ class ContractSlaResult:
     breach: bool = False
 
 
+ACTIVE_RATE_SHEET = "Rate card+LT for transportation"
+# Nome interno (usato da calculate/transit_hours) -> intestazione accettata, dopo la
+# normalizzazione (minuscolo, a capo e punteggiatura -> spazio). Accetta sia il file
+# vecchio ('Small truck up to 15 pallet', 'FTL', 'Groupage up to 8 pallets', 'Direct')
+# sia quello nuovo ('Small truck max 15 pallet', 'FTL >=16 pallet', 'Groupage max 8
+# pallets', 'Direct >= 9 pallet'). 'Zip code 2-digit' non serve e puo' mancare.
+ACTIVE_RATE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("Province code", r"province code|codice provincia"),
+    *((f"{n} pallet", rf"{n} pallets?") for n in range(1, 9)),
+    ("Small truck up to 15 pallet", r"small truck.*"),
+    ("FTL", r"ftl.*"),
+    ("Groupage up to 8 pallets", r"groupage (?:max|up to) 8 pallets?"),
+    ("Direct", r"direct.*"),
+)
+
+
+def normalize_rate_header(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", clean_text(value).lower()).strip()
+
+
+def map_active_rate_headers(header_cells: Any) -> dict[str, int]:
+    mapping: dict[str, int] = {}
+    for col_idx, cell in enumerate(header_cells):
+        normalized = normalize_rate_header(cell)
+        if not normalized:
+            continue
+        for name, pattern in ACTIVE_RATE_COLUMNS:
+            if name not in mapping and re.fullmatch(pattern, normalized):
+                mapping[name] = col_idx
+                break
+    return mapping
+
+
 class ActiveRateCard:
     def __init__(
         self,
@@ -1248,23 +1281,56 @@ class ActiveRateCard:
     @classmethod
     def from_excel(cls, path: Path) -> "ActiveRateCard":
         wb = load_workbook(path, read_only=True, data_only=True)
-        ws = wb["Rate card+LT for transportation"]
-        extra_settings = parse_active_extra_settings(wb)
-        rows = ws.iter_rows(min_row=4, values_only=True)
-        headers = [clean_text(value) for value in next(rows)]
-        rates: dict[str, dict[str, Any]] = {}
+        try:
+            if ACTIVE_RATE_SHEET not in wb.sheetnames:
+                raise ValueError(
+                    f"Rate card attive non valida: manca il foglio '{ACTIVE_RATE_SHEET}' "
+                    f"(fogli trovati: {', '.join(wb.sheetnames)})."
+                )
+            ws = wb[ACTIVE_RATE_SHEET]
+            extra_settings = parse_active_extra_settings(wb)
+            col_map: dict[str, int] | None = None
+            seen_headers: list[str] = []
+            rates: dict[str, dict[str, Any]] = {}
 
-        for values in rows:
-            row = {
-                headers[col_idx]: values[col_idx] if col_idx < len(values) else None
-                for col_idx in range(len(headers))
-            }
-            province_code = clean_text(row.get("Province code")).upper()
-            if not province_code:
-                continue
-            rates[province_code] = row
+            for row_index, values in enumerate(ws.iter_rows(values_only=True)):
+                if col_map is None:
+                    # La riga di intestazione e' la prima (entro le prime 30) con 'Province code':
+                    # non si assume piu' che sia la riga 4 ne' la posizione delle colonne.
+                    if row_index >= 30:
+                        break
+                    candidate = map_active_rate_headers(values)
+                    if "Province code" not in candidate:
+                        continue
+                    seen_headers = [clean_text(value) for value in values if clean_text(value)]
+                    missing = [name for name, _pattern in ACTIVE_RATE_COLUMNS if name not in candidate]
+                    if missing:
+                        raise ValueError(
+                            "Rate card attive non valida: colonne obbligatorie mancanti "
+                            f"({', '.join(missing)}). Intestazioni trovate: "
+                            f"{' | '.join(h.replace(chr(10), ' ') for h in seen_headers)}."
+                        )
+                    col_map = candidate
+                    continue
+                province_code = clean_text(
+                    values[col_map["Province code"]] if col_map["Province code"] < len(values) else None
+                ).upper()
+                if not province_code:
+                    continue
+                rates[province_code] = {
+                    name: values[col_idx] if col_idx < len(values) else None
+                    for name, col_idx in col_map.items()
+                }
+        finally:
+            wb.close()
 
-        wb.close()
+        if col_map is None:
+            raise ValueError(
+                f"Rate card attive non valida: nel foglio '{ACTIVE_RATE_SHEET}' non trovo la riga "
+                "di intestazione con 'Province code'."
+            )
+        if not rates:
+            raise ValueError("Rate card attive non valida: nessuna provincia letta.")
         return cls(rates, extra_settings)
 
     def calculate(
@@ -1280,7 +1346,8 @@ class ActiveRateCard:
         if row is None or pallet_value is None:
             return None
 
-        billed_pallets = max(1, math.ceil(pallet_value))
+        # Tolleranza minima per il rumore dei float (8.0000000000004 pallet non sono 9).
+        billed_pallets = max(1, math.ceil(pallet_value - 1e-6))
         if billed_pallets <= 8:
             column = f"{billed_pallets} pallet"
         elif billed_pallets <= 15:

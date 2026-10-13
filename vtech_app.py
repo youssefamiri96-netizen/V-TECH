@@ -3709,6 +3709,7 @@ def export_active_billing_report(
 ) -> Path:
     rows = load_shipments_from_db(db_path)
     selected: list[tuple[date, dict[str, Any]]] = []
+    without_active: list[tuple[date, dict[str, Any]]] = []
     normalized_month = clean_text(month_key)
     for row in rows:
         ref_date = billing_reference_date(row)
@@ -3718,6 +3719,7 @@ def export_active_billing_report(
             continue
         active = to_float(row.get("Costo Attivo"))
         if active is None or active <= 0:
+            without_active.append((ref_date, row))
             continue
         selected.append((ref_date, row))
 
@@ -3861,6 +3863,27 @@ def export_active_billing_report(
     detail_table = Table(displayName="DettaglioAttivo", ref=detail_ref)
     detail_table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium4", showRowStripes=False, showFirstColumn=False, showLastColumn=False)
     detail.add_table(detail_table)
+
+    if without_active:
+        # Spedizioni del periodo senza attivo (provincia senza tariffa, pallet non valido,
+        # tariffe non caricate): non finiscono in fattura, quindi si elencano a parte.
+        missing_sheet = workbook.create_sheet("Senza attivo")
+        missing_sheet.append(["Ref. date", "Shipment", "Customer", "Province", "Delivery address", "Service", "Pallets", "Status"])
+        for ref_date, row in sorted(without_active, key=lambda item: (item[0], clean_text(item[1].get("Shipment")))):
+            missing_sheet.append([
+                ref_date,
+                clean_text(row.get("Shipment")),
+                clean_text(row.get("Route to Customer")),
+                clean_text(row.get("Provincia")),
+                clean_text(row.get("Route To Address")),
+                clean_text(row.get("Service Level")),
+                to_float(row.get("Theoretical Pallets")) or "",
+                clean_text(row.get("Stato")),
+            ])
+        for cell in missing_sheet["A"][1:]:
+            if isinstance(cell.value, date):
+                cell.number_format = "dd/mm/yyyy"
+        _style_passive_sheet(missing_sheet, money_columns=[], numeric_columns=[7])
 
     downloads_dir.mkdir(parents=True, exist_ok=True)
     suffix = normalized_month if normalized_month else "tutti_i_mesi"
