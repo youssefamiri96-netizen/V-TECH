@@ -49,6 +49,7 @@ from vtech_app import (
     delete_shipments_permanently,
     display_value,
     export_active_billing_report,
+    export_recipients_to_verify,
     export_wholesaler_credit_notes,
     export_passive_billing_by_carrier,
     export_planned_shipments,
@@ -163,6 +164,7 @@ BILLING_POST_PATHS = {
     "/api/passive-export",
     "/api/active-export",
     "/api/credit-notes-export",
+    "/api/recipients-check-export",
     "/api/fuel-settings",
     "/api/open-path",
 }
@@ -1738,6 +1740,9 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/credit-notes-export":
                 self._handle_credit_notes_export(body, user)
                 return
+            if parsed.path == "/api/recipients-check-export":
+                self._handle_recipients_check_export(user)
+                return
             if parsed.path == "/api/fuel-settings":
                 self._handle_fuel_settings(body, user)
                 return
@@ -2045,6 +2050,15 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             "path": str(output_path),
             "downloadUrl": download_url_for_path(output_path),
             "data": grouped_shipments(user),
+        })
+
+    def _handle_recipients_check_export(self, user: dict[str, str]) -> None:
+        output_path = export_recipients_to_verify()
+        self._send_json({
+            "ok": True,
+            "file": output_path.name,
+            "path": str(output_path),
+            "downloadUrl": download_url_for_path(output_path),
         })
 
     def _handle_fuel_settings(self, body: dict[str, Any], user: dict[str, str]) -> None:
