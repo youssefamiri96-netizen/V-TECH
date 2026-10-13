@@ -50,10 +50,7 @@ from vtech_importer import (
     write_csv,
 )
 from tariff_engine import (
-    CUSTOMER_TYPE_GDO,
-    CUSTOMER_TYPE_WHOLESALER,
     WHOLESALER_RULE_START,
-    suspected_customer_class,
     apply_contract_sla_to_shipments,
     apply_tariffs_to_shipments as engine_apply_tariffs_to_shipments,
     default_carrier_tariffs_path,
@@ -3887,17 +3884,14 @@ def export_wholesaler_credit_notes(
     db_path: Path = DB_PATH,
     downloads_dir: Path = DOWNLOADS_DIR,
 ) -> Path:
-    """Excel per le note di credito sui mesi gia' fatturati con extra GDO (mesi
-    precedenti a WHOLESALER_RULE_START, quando ogni consegna a un nome dell'anagrafica
-    era trattata come GDO).
+    """Note di credito da emettere per i mesi precedenti a WHOLESALER_RULE_START, in cui
+    ogni consegna a un nome dell'anagrafica clienti era fatturata con l'extra GDO.
 
-    Ogni spedizione fatturata come GDO viene ricalcolata con le regole di oggi
-    (punto di consegna riconosciuto da nome + CAP, grossisti senza extra GDO e senza
-    sponda, DKV come BKV). Due gruppi:
-    - grossisti in elenco (nome e punto di consegna nell'anagrafica): nota di credito
-      certa, fogli di riepilogo e dettaglio;
-    - consegne a un nome in anagrafica ma in un punto di consegna non in elenco
-      (negozi, altre sedi): foglio "Da verificare", ricalcolate come cliente normale."""
+    Ogni spedizione fatturata come GDO viene ricalcolata con le regole di oggi: i
+    grossisti non pagano l'extra GDO +20% ne' la sponda, ma pagano gli altri extra
+    (preavviso BKL, fixed time slot BKV, data tassativa DKV, ETS, fuel). La nota di
+    credito e' fatturato - dovuto. Un foglio con una riga per mese (la nota di credito da
+    emettere) e uno con il dettaglio spedizione per spedizione."""
     rows = load_shipments_from_db(db_path)
     normalized_month = clean_text(month_key)
     selected: list[tuple[date, dict[str, Any]]] = []
@@ -3931,16 +3925,10 @@ def export_wholesaler_credit_notes(
         wholesaler_rule=lambda _row: True,
     )
 
-    GROUP_LISTED = "grossista"
-    GROUP_VERIFY = "verifica"
     records: list[dict[str, Any]] = []
     for (ref_date, old_row), new_row in zip(selected, corrected_rows):
-        if clean_text(new_row.get("Cliente Grossista")).upper() == "SI":
-            group = GROUP_LISTED
-        elif not clean_text(new_row.get("Tipo Cliente")):
-            group = GROUP_VERIFY
-        else:
-            continue  # resta GDO anche con le regole di oggi: nessuna differenza
+        if clean_text(new_row.get("Cliente GDO")).upper() == "SI":
+            continue  # resta GDO anche con le regole di oggi: nessuna nota di credito
         billed = round(to_float(old_row.get("Costo Attivo")) or 0, 2)
         corrected = to_float(new_row.get("Costo Attivo"))
         if corrected is None:
@@ -3949,42 +3937,26 @@ def export_wholesaler_credit_notes(
         old_extras = parse_billing_extra_amounts(old_row.get("Extra Attivi Applicati"))
         new_extras = parse_billing_extra_amounts(new_row.get("Extra Attivi Applicati"))
         labels = set(old_extras) | set(new_extras)
-        removed = round(sum(max(old_extras.get(label, 0) - new_extras.get(label, 0), 0) for label in labels), 2)
-        added = round(sum(max(new_extras.get(label, 0) - old_extras.get(label, 0), 0) for label in labels), 2)
         records.append({
-            "group": group,
             "ref_date": ref_date,
             "month": f"{ref_date.year:04d}-{ref_date.month:02d}",
             "row": old_row,
             "billed": billed,
             "corrected": corrected,
-            "removed": removed,
-            "added": added,
+            "removed": round(sum(max(old_extras.get(label, 0) - new_extras.get(label, 0), 0) for label in labels), 2),
+            "added": round(sum(max(new_extras.get(label, 0) - old_extras.get(label, 0), 0) for label in labels), 2),
             "credit": round(billed - corrected, 2),
             "old_extras": clean_text(old_row.get("Extra Attivi Applicati")),
             "new_extras": clean_text(new_row.get("Extra Attivi Applicati")),
-            "similar": clean_text(new_row.get("Anagrafica Simile")),
         })
+    if not records:
+        raise ValueError("Nessuna nota di credito da emettere: tutte le spedizioni restano GDO con le regole di oggi.")
     records.sort(key=lambda item: (
         item["month"],
         clean_text(item["row"].get("Route to Customer")),
         item["ref_date"],
         clean_text(item["row"].get("Shipment")),
     ))
-    listed = [record for record in records if record["group"] == GROUP_LISTED]
-    to_verify = [record for record in records if record["group"] == GROUP_VERIFY]
-    if not listed and not to_verify:
-        raise ValueError("Nessuna differenza da stornare: tutte le spedizioni restano GDO anche con le regole di oggi.")
-
-    def totals_row(items: list[dict[str, Any]]) -> list[Any]:
-        return [
-            len(items),
-            round(sum(item["billed"] for item in items), 2),
-            round(sum(item["corrected"] for item in items), 2),
-            round(sum(item["removed"] for item in items), 2),
-            round(sum(item["added"] for item in items), 2),
-            round(sum(item["credit"] for item in items), 2),
-        ]
 
     def style_total_row(sheet, row_index: int, color: str) -> None:
         for cell in sheet[row_index]:
@@ -3996,231 +3968,100 @@ def export_wholesaler_credit_notes(
         table.tableStyleInfo = TableStyleInfo(name=style, showRowStripes=stripes, showFirstColumn=False, showLastColumn=False)
         sheet.add_table(table)
 
-    def write_detail_sheet(sheet, items: list[dict[str, Any]], table_name: str, with_similar: bool) -> None:
-        headers = [
-            "Mese",
-            "Data rif.",
-            "Shipment",
-            "Ordini",
-            "Cliente",
-            "Indirizzo",
-            "Provincia",
-            "Servizio",
-            "Freight",
-            "Pallet fatturati",
-            "Attivo fatturato",
-            "Attivo corretto",
-            "Extra GDO stornati",
-            "Extra da addebitare",
-            "Nota di credito",
-            "Extra fatturati",
-            "Extra corretti",
-            "Stato",
-        ]
-        if with_similar:
-            headers.append("Voce simile in anagrafica")
-        sheet.append(headers)
-        if not items:
-            _style_passive_sheet(sheet, money_columns=[], numeric_columns=[])
-            return
-        for record in items:
-            row = record["row"]
-            line = [
-                record["month"],
-                record["ref_date"],
-                clean_text(row.get("Shipment")),
-                clean_text(row.get("Orders")),
-                clean_text(row.get("Route to Customer")),
-                clean_text(row.get("Route To Address")),
-                clean_text(row.get("Provincia")),
-                clean_text(row.get("Service Level")),
-                clean_text(row.get("Freight Code")),
-                to_float(row.get("Pallet Fatturati")) or "",
-                record["billed"],
-                record["corrected"],
-                record["removed"],
-                record["added"],
-                record["credit"],
-                record["old_extras"],
-                record["new_extras"],
-                clean_text(row.get("Stato")),
-            ]
-            if with_similar:
-                line.append(record["similar"])
-            sheet.append(line)
-        total_row = sheet.max_row + 1
-        totals = [""] * len(headers)
-        totals[0] = "Totale"
-        for column in range(10, 16):
-            totals[column - 1] = sum_formula(column, total_row)
-        sheet.append(totals)
-        style_total_row(sheet, total_row, "ECFDF5")
-        for cell in sheet["B"][1:]:
-            if isinstance(cell.value, date):
-                cell.number_format = "dd/mm/yyyy"
-        _style_passive_sheet(sheet, money_columns=[11, 12, 13, 14, 15], numeric_columns=[10])
-        add_table(sheet, table_name, "TableStyleMedium4", False)
-
     workbook = Workbook()
     months_sheet = workbook.active
-    months_sheet.title = "Riepilogo mesi"
+    months_sheet.title = "Note di credito"
     months_sheet.append([
         "Mese",
         "Spedizioni",
-        "Attivo fatturato",
-        "Attivo corretto",
+        "Fatturato",
+        "Dovuto",
         "Extra GDO stornati",
         "Extra da addebitare",
         "Nota di credito",
     ])
     by_month: dict[str, list[dict[str, Any]]] = {}
-    for record in listed:
+    for record in records:
         by_month.setdefault(record["month"], []).append(record)
     for month, items in sorted(by_month.items()):
-        months_sheet.append([month, *totals_row(items)])
+        months_sheet.append([
+            month,
+            len(items),
+            round(sum(item["billed"] for item in items), 2),
+            round(sum(item["corrected"] for item in items), 2),
+            round(sum(item["removed"] for item in items), 2),
+            round(sum(item["added"] for item in items), 2),
+            round(sum(item["credit"] for item in items), 2),
+        ])
     month_total_row = months_sheet.max_row + 1
-    months_sheet.append(["Totale", *[sum_formula(column, month_total_row) if by_month else 0 for column in range(2, 8)]])
+    months_sheet.append(["Totale", *[sum_formula(column, month_total_row) for column in range(2, 8)]])
     style_total_row(months_sheet, month_total_row, "DBEAFE")
     _style_passive_sheet(months_sheet, money_columns=[3, 4, 5, 6, 7], numeric_columns=[2])
-    add_table(months_sheet, "NoteCreditoMesi", "TableStyleMedium2", True)
+    add_table(months_sheet, "NoteCredito", "TableStyleMedium2", True)
 
-    customers_sheet = workbook.create_sheet("Riepilogo clienti")
-    customers_sheet.append([
+    detail_sheet = workbook.create_sheet("Dettaglio")
+    detail_headers = [
         "Mese",
+        "Data rif.",
+        "Shipment",
+        "Ordini",
         "Cliente",
-        "Spedizioni",
-        "Attivo fatturato",
-        "Attivo corretto",
+        "Indirizzo",
+        "Provincia",
+        "Servizio",
+        "Freight",
+        "Pallet fatturati",
+        "Fatturato",
+        "Dovuto",
         "Extra GDO stornati",
         "Extra da addebitare",
         "Nota di credito",
-    ])
-    by_month_customer: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for record in listed:
-        customer = clean_text(record["row"].get("Route to Customer")) or "CLIENTE NON INDICATO"
-        by_month_customer.setdefault((record["month"], customer), []).append(record)
-    for (month, customer), items in sorted(by_month_customer.items()):
-        customers_sheet.append([month, customer, *totals_row(items)])
-    customers_total_row = customers_sheet.max_row + 1
-    customers_sheet.append(["Totale", "", *[sum_formula(column, customers_total_row) if by_month_customer else 0 for column in range(3, 9)]])
-    style_total_row(customers_sheet, customers_total_row, "DBEAFE")
-    _style_passive_sheet(customers_sheet, money_columns=[4, 5, 6, 7, 8], numeric_columns=[3])
-    add_table(customers_sheet, "NoteCreditoClienti", "TableStyleMedium2", True)
-
-    write_detail_sheet(workbook.create_sheet("Dettaglio spedizioni"), listed, "NoteCreditoDettaglio", False)
-    write_detail_sheet(workbook.create_sheet("Da verificare"), to_verify, "NoteCreditoDaVerificare", True)
-
-    notes_sheet = workbook.create_sheet("Criteri")
-    for line in (
-        "Spedizioni con competenza precedente al "
-        f"{WHOLESALER_RULE_START.strftime('%d/%m/%Y')} fatturate con l'extra GDO, quando ogni consegna a un nome dell'anagrafica "
-        "clienti (gdo_customers.csv) era trattata come GDO.",
-        "Attivo fatturato: calcolo con la vecchia regola (extra 'GDO delivery and time slot booking' +20%).",
-        "Attivo corretto: ricalcolo con le regole di oggi. Il punto di consegna si riconosce da nome simile + CAP/citta' (il report non ha "
-        "codice cliente ne' ship-to). I grossisti non hanno extra GDO ne' sponda idraulica (salvo nota SPONDA in anagrafica); restano gli "
-        "altri extra (ETS, fuel, preavviso telefonico BKL, fixed time slot BKV, data tassativa DKV come BKV).",
-        "Nota di credito = Attivo fatturato - Attivo corretto. Un valore negativo indica un importo da addebitare.",
-        "Fogli 'Riepilogo mesi', 'Riepilogo clienti' e 'Dettaglio spedizioni': grossisti il cui punto di consegna e' nell'anagrafica.",
-        "Foglio 'Da verificare': spedizioni fatturate come GDO perche' il NOME era in anagrafica, ma consegnate in un punto che non e' "
-        "nell'elenco (negozi o altre sedi). Sono ricalcolate come cliente normale (con sponda sul groupage): da confermare con il cliente "
-        "prima di emettere la nota di credito. Non sono incluse nei totali dei primi fogli.",
-        "Il ricalcolo usa le tariffe attive, l'indice ISTAT e il fuel mensile attualmente configurati nel programma: "
-        "se una fattura passata ha usato valori diversi, la differenza va verificata.",
-    ):
-        notes_sheet.append([line])
-    notes_sheet.column_dimensions["A"].width = 140
-    for cell in notes_sheet["A"]:
-        cell.alignment = Alignment(wrap_text=True, vertical="top")
+        "Extra fatturati",
+        "Extra dovuti",
+        "Stato",
+    ]
+    detail_sheet.append(detail_headers)
+    for record in records:
+        row = record["row"]
+        detail_sheet.append([
+            record["month"],
+            record["ref_date"],
+            clean_text(row.get("Shipment")),
+            clean_text(row.get("Orders")),
+            clean_text(row.get("Route to Customer")),
+            clean_text(row.get("Route To Address")),
+            clean_text(row.get("Provincia")),
+            clean_text(row.get("Service Level")),
+            clean_text(row.get("Freight Code")),
+            to_float(row.get("Pallet Fatturati")) or "",
+            record["billed"],
+            record["corrected"],
+            record["removed"],
+            record["added"],
+            record["credit"],
+            record["old_extras"],
+            record["new_extras"],
+            clean_text(row.get("Stato")),
+        ])
+    detail_total_row = detail_sheet.max_row + 1
+    detail_totals = [""] * len(detail_headers)
+    detail_totals[0] = "Totale"
+    for column in range(10, 16):
+        detail_totals[column - 1] = sum_formula(column, detail_total_row)
+    detail_sheet.append(detail_totals)
+    style_total_row(detail_sheet, detail_total_row, "ECFDF5")
+    for cell in detail_sheet["B"][1:]:
+        if isinstance(cell.value, date):
+            cell.number_format = "dd/mm/yyyy"
+    _style_passive_sheet(detail_sheet, money_columns=[11, 12, 13, 14, 15], numeric_columns=[10])
+    add_table(detail_sheet, "NoteCreditoDettaglio", "TableStyleMedium4", False)
 
     downloads_dir.mkdir(parents=True, exist_ok=True)
     suffix = normalized_month if normalized_month else "tutti_i_mesi"
-    output_path = downloads_dir / f"VTech_note_credito_grossisti_{suffix}.xlsx"
+    output_path = downloads_dir / f"VTech_note_credito_{suffix}.xlsx"
     workbook.save(output_path)
     if not output_path.exists() or output_path.stat().st_size == 0:
-        raise OSError(f"Excel note di credito grossisti non creato correttamente: {output_path}")
-    return output_path
-
-
-def export_recipients_to_verify(
-    db_path: Path = DB_PATH,
-    downloads_dir: Path = DOWNLOADS_DIR,
-) -> Path:
-    """Destinatari dal 01/10/2026 che il programma non e' sicuro di aver classificato:
-    nome in anagrafica ma punto di consegna diverso, riconoscimento parziale, oppure nome
-    che somiglia a una catena GDO / a un grossista senza essere in anagrafica. Serve per
-    non lasciare passare una GDO come cliente normale."""
-    rows = load_shipments_from_db(db_path)
-    groups: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in rows:
-        ref_date = billing_reference_date(row)
-        if ref_date is not None and ref_date < WHOLESALER_RULE_START:
-            continue
-        name = clean_text(row.get("Route to Customer"))
-        address = clean_text(row.get("Route To Address"))
-        reason = clean_text(row.get("Verifica Anagrafica"))
-        suspected = ""
-        if not reason and not clean_text(row.get("Tipo Cliente")) and "AMAZON" not in name.upper():
-            suspected = suspected_customer_class(name)
-            if suspected:
-                reason = f"Il nome somiglia a un {'GDO' if suspected == CUSTOMER_TYPE_GDO else 'grossista'} ma non e' in anagrafica"
-        if not reason:
-            continue
-        entry = groups.setdefault((name, address), {
-            "name": name,
-            "address": address,
-            "reason": reason,
-            "current": "Grossista" if clean_text(row.get("Cliente Grossista")) else ("GDO" if clean_text(row.get("Cliente GDO")) else "Cliente normale"),
-            "similar": clean_text(row.get("Anagrafica Simile")),
-            "shipments": [],
-            "dates": [],
-        })
-        entry["shipments"].append(clean_text(row.get("Shipment")))
-        if ref_date is not None:
-            entry["dates"].append(ref_date)
-
-    if not groups:
-        raise ValueError("Nessun destinatario da verificare dal 01/10/2026.")
-
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.title = "Destinatari da verificare"
-    sheet.append([
-        "Destinatario",
-        "Indirizzo",
-        "Spedizioni",
-        "Prima data",
-        "Ultima data",
-        "Trattato oggi come",
-        "Motivo",
-        "Voce simile in anagrafica",
-        "Shipment",
-    ])
-    for entry in sorted(groups.values(), key=lambda item: (-len(item["shipments"]), item["name"])):
-        sheet.append([
-            entry["name"],
-            entry["address"],
-            len(entry["shipments"]),
-            min(entry["dates"]) if entry["dates"] else "",
-            max(entry["dates"]) if entry["dates"] else "",
-            entry["current"],
-            entry["reason"],
-            entry["similar"],
-            ", ".join(entry["shipments"][:30]),
-        ])
-    for column in ("D", "E"):
-        for cell in sheet[column][1:]:
-            if isinstance(cell.value, date):
-                cell.number_format = "dd/mm/yyyy"
-    _style_passive_sheet(sheet, money_columns=[], numeric_columns=[])
-    table = Table(displayName="DestinatariDaVerificare", ref=f"A1:{get_column_letter(sheet.max_column)}{sheet.max_row}")
-    table.tableStyleInfo = TableStyleInfo(name="TableStyleMedium2", showRowStripes=True, showFirstColumn=False, showLastColumn=False)
-    sheet.add_table(table)
-
-    downloads_dir.mkdir(parents=True, exist_ok=True)
-    output_path = downloads_dir / "VTech_destinatari_da_verificare.xlsx"
-    workbook.save(output_path)
-    if not output_path.exists() or output_path.stat().st_size == 0:
-        raise OSError(f"Excel destinatari da verificare non creato correttamente: {output_path}")
+        raise OSError(f"Excel note di credito non creato correttamente: {output_path}")
     return output_path
 
 

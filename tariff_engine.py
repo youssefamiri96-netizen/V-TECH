@@ -318,8 +318,17 @@ class GdoCustomerRegistry:
     entries: tuple["GdoRegistryEntry", ...] = ()
 
 
+# Forme societarie in piu' rispetto a LEGAL_SUFFIX_TOKENS, usate solo dal riconoscimento
+# dal 01/10/2026 (il vecchio calcolo dei mesi fatturati non deve cambiare).
+EXTRA_LEGAL_SUFFIX_TOKENS = {"SRLS", "SNC", "SAS", "SCARL", "SAPA", "UNIPERSONALE"}
+
+
 def strip_legal_suffixes(normalized: str) -> str:
-    return " ".join(token for token in normalized.split() if token not in LEGAL_SUFFIX_TOKENS)
+    return " ".join(
+        token
+        for token in normalized.split()
+        if token not in LEGAL_SUFFIX_TOKENS and token not in EXTRA_LEGAL_SUFFIX_TOKENS
+    )
 
 
 CAP_PATTERN = re.compile(r"(?<!\d)\d{5}(?!\d)")
@@ -393,94 +402,139 @@ def same_location(shipment_cap: str, shipment_city: str, entry: GdoRegistryEntry
     return None
 
 
-GDO_NAME_KEYWORDS = (
-    "CONAD", "COOP", "ESSELUNGA", "CARREFOUR", "AUCHAN", "LIDL", "EUROSPIN", "IPER",
-    "SUPERMERCAT", "UNIEURO", "MEDIAWORLD", "MEDIAMARKT", "TOYS CENTER", "DESPAR",
-    "SELEX", "FINIPER", "GIGANTE", "LEROY", "DISCOUNT", "PAC 2000", "BENNET", "ASPIAG",
-    "PRENATAL", "CEDI", "MARKET", "EUROPA 2000", "DECATHLON", "OVS", "SIGMA", "CRAI",
+# Catene GDO riconoscibili dal solo nome, anche se non sono nel file del cliente: cosi'
+# una GDO non sfugge solo perche' nell'elenco manca quella sede o quella cooperativa.
+GDO_CHAIN_WORDS = (
+    "CONAD", "PAC 2000", "ESSELUNGA", "CARREFOUR", "AUCHAN", "LIDL", "EUROSPIN",
+    "UNIEURO", "MEDIAWORLD", "MEDIA WORLD", "MEDIAMARKT", "MEDIA MARKT", "MEDIAMARKTSATURN",
+    "DESPAR", "ASPIAG", "IPERAL", "FINIPER", "BENNET", "SELEX", "TIGROS", "LEROY MERLIN",
+    "COOP ALLEANZA", "COOP LOMBARDIA", "COOP LIGURIA", "COOP ITALIA", "NOVA COOP",
+    "UNICOOP", "IPERCOOP", "TOYS CENTER", "PRENATAL", "DECATHLON", "BRICO IO", "BRICOMAN",
 )
-WHOLESALER_NAME_KEYWORDS = ("INGROSS", "CASH", "DISTRIBUZ", "WHOLESALE", "GROSSIST")
+GDO_CHAIN_PREFIXES = ("SUPERMERCAT", "IPERMERCAT")
 
 
-def suspected_customer_class(name: Any) -> str:
-    """Solo per i controlli: il nome fa pensare a una GDO o a un grossista?"""
-    normalized = f" {normalize_registry_text(name)} "
-    if any(f" {keyword}" in normalized for keyword in GDO_NAME_KEYWORDS):
-        return CUSTOMER_TYPE_GDO
-    if any(keyword in normalized for keyword in WHOLESALER_NAME_KEYWORDS):
-        return CUSTOMER_TYPE_WHOLESALER
-    return ""
+def is_gdo_chain_name(name: Any) -> bool:
+    normalized = normalize_registry_text(name)
+    if not normalized:
+        return False
+    padded = f" {normalized} "
+    if any(f" {word} " in padded for word in GDO_CHAIN_WORDS):
+        return True
+    return any(token.startswith(GDO_CHAIN_PREFIXES) for token in normalized.split())
 
 
-SHIPTO_STATUS_MATCHED = "matched"
-SHIPTO_STATUS_NAME_ONLY = "name_only"
-SHIPTO_STATUS_ADDRESS_ONLY = "address_only"
-SHIPTO_STATUS_UNLISTED = "unlisted"
-SHIPTO_STATUS_NONE = ""
+def name_match_strength(shipment_name: str, entry: GdoRegistryEntry) -> int:
+    """2 = stesso cliente (nome uguale a meno di punteggiatura e forma societaria, o nome
+    troncato a 30 caratteri dal report); 1 = nome simile (parole in piu', piccoli errori
+    di battitura), da confermare con il CAP; 0 = altro cliente."""
+    normalized = normalize_registry_text(shipment_name)
+    if not normalized:
+        return 0
+    if customer_match_keys(normalized) & customer_match_keys(entry.name):
+        return 2
+    if (
+        len(clean_text(shipment_name)) >= REPORT_CUSTOMER_NAME_MAX_CHARS
+        and len(normalized) >= TRUNCATED_NAME_MIN_PREFIX_CHARS
+        and entry.name.startswith(normalized)
+    ):
+        return 2
+    stripped = strip_legal_suffixes(normalized)
+    if stripped and stripped == entry.stripped:
+        return 2
+    shipment_tokens = stripped.split()
+    entry_tokens = entry.stripped.split()
+    shorter, longer = sorted((shipment_tokens, entry_tokens), key=len)
+    if shorter and longer[: len(shorter)] == shorter and len("".join(shorter)) >= 4:
+        return 1
+    if len(stripped) >= 6 and len(entry.stripped) >= 6:
+        if SequenceMatcher(None, stripped, entry.stripped).ratio() >= NAME_FUZZY_MIN_RATIO:
+            return 1
+    return 0
 
-SHIPTO_STATUS_NOTES = {
-    SHIPTO_STATUS_NAME_ONLY: "Riconosciuto solo dal nome (indirizzo non verificabile)",
-    SHIPTO_STATUS_ADDRESS_ONLY: "Riconosciuto solo dall'indirizzo (nome diverso)",
-    SHIPTO_STATUS_UNLISTED: "Nome in anagrafica ma punto di consegna non in elenco",
-}
+
+def same_location(shipment_cap: str, shipment_city: str, entry: GdoRegistryEntry) -> bool | None:
+    """True/False se il punto di consegna coincide con quello in anagrafica, None se
+    non si puo' verificare (indirizzo senza CAP e senza citta')."""
+    if shipment_cap and entry.cap:
+        return shipment_cap == entry.cap
+    if shipment_city and entry.city:
+        return (
+            shipment_city == entry.city
+            or entry.city.startswith(shipment_city)
+            or shipment_city.startswith(entry.city)
+        )
+    return None
 
 
-def match_shipto(
+def match_customer(
     shipment_row: dict[str, Any],
     registry: GdoCustomerRegistry | None,
-) -> tuple[GdoCustomerMatch | None, str, list[GdoRegistryEntry]]:
-    """Riconosce il punto di consegna (nome simile + CAP/citta') e non piu' solo il nome.
+) -> GdoCustomerMatch | None:
+    """Riconoscimento GDO / grossista valido dal 01/10/2026.
 
-    Ritorna (match, stato, voci_simili). Un cliente con lo stesso nome ma consegnato
-    in un posto che non e' nell'anagrafica NON viene classificato (stato "unlisted")."""
-    if not registry or not registry.entries:
-        return None, SHIPTO_STATUS_NONE, []
-
-    shipment_cap, shipment_city, shipment_street = parse_location(
-        next(
-            (
-                clean_text(shipment_row.get(column))
-                for column in ("Route To Address", "Indirizzo Consegna", "Address")
-                if clean_text(shipment_row.get(column))
-            ),
-            "",
-        )
-    )
+    In ordine: nome uguale (tollera virgole, punti, forma societaria, nome troncato a 30
+    caratteri) -> nome simile confermato dal CAP -> solo indirizzo (CAP + via, per le
+    consegne presso magazzini con un altro nome) -> catena GDO riconosciuta dal nome.
+    Il report non ha codice cliente ne' ship-to, quindi nome e indirizzo sono tutto."""
     names: list[str] = []
     for column in ("Route to Customer", "Customer", "Cliente"):
         names.extend(iter_registry_values(shipment_row.get(column)))
 
-    similar = [entry for entry in registry.entries if any(names_look_alike(name, entry) for name in names)]
+    if registry and registry.entries:
+        shipment_cap, shipment_city, shipment_street = parse_location(
+            next(
+                (
+                    clean_text(shipment_row.get(column))
+                    for column in ("Route To Address", "Indirizzo Consegna", "Address")
+                    if clean_text(shipment_row.get(column))
+                ),
+                "",
+            )
+        )
 
-    def best(entries: list[GdoRegistryEntry]) -> GdoCustomerMatch:
-        winner = next((entry.match for entry in entries if entry.match.active_tail_lift), entries[0].match)
-        return winner
+        def best(entries: list[GdoRegistryEntry]) -> GdoCustomerMatch:
+            return next((entry.match for entry in entries if entry.match.active_tail_lift), entries[0].match)
 
-    if similar:
-        verdicts = [(entry, same_location(shipment_cap, shipment_city, entry)) for entry in similar]
-        located = [entry for entry, verdict in verdicts if verdict is True]
-        if located:
-            return best(located), SHIPTO_STATUS_MATCHED, similar
-        unknown = [entry for entry, verdict in verdicts if verdict is None]
-        if unknown:
-            return best(unknown), SHIPTO_STATUS_NAME_ONLY, similar
-        return None, SHIPTO_STATUS_UNLISTED, similar
-
-    def street_words(value: str) -> str:
-        return " ".join(token for token in value.split() if not token.isdigit())
-
-    shipment_words = street_words(shipment_street)
-    if shipment_cap and len(shipment_words) >= 8:
-        by_address = [
-            entry
+        strengths = [
+            (entry, max((name_match_strength(name, entry) for name in names), default=0))
             for entry in registry.entries
-            if entry.cap == shipment_cap
-            and len(street_words(entry.street)) >= 8
-            and (shipment_words in street_words(entry.street) or street_words(entry.street) in shipment_words)
         ]
-        if by_address:
-            return best(by_address), SHIPTO_STATUS_ADDRESS_ONLY, by_address
-    return None, SHIPTO_STATUS_NONE, []
+        strong = [entry for entry, strength in strengths if strength == 2]
+        if strong:
+            located = [entry for entry in strong if same_location(shipment_cap, shipment_city, entry)]
+            return best(located or strong)
+        loose = [
+            entry
+            for entry, strength in strengths
+            if strength == 1 and same_location(shipment_cap, shipment_city, entry) is not False
+        ]
+        if loose:
+            located = [entry for entry in loose if same_location(shipment_cap, shipment_city, entry)]
+            return best(located or loose)
+
+        def street_words(value: str) -> str:
+            return " ".join(token for token in value.split() if not token.isdigit())
+
+        shipment_words = street_words(shipment_street)
+        if shipment_cap and len(shipment_words) >= 8:
+            by_address = [
+                entry
+                for entry in registry.entries
+                if entry.cap == shipment_cap
+                and len(street_words(entry.street)) >= 8
+                and (shipment_words in street_words(entry.street) or street_words(entry.street) in shipment_words)
+            ]
+            if by_address:
+                return best(by_address)
+
+    for name in names:
+        if is_gdo_chain_name(name):
+            return GdoCustomerMatch(
+                label=f"{clean_text(name)} (catena GDO riconosciuta dal nome)",
+                customer_type=CUSTOMER_TYPE_GDO,
+            )
+    return None
 
 
 def load_gdo_customer_registry(path: Path | None) -> GdoCustomerRegistry | None:
@@ -1994,20 +2048,10 @@ def apply_tariffs_to_shipments(
 
         wholesaler_rule_on = wholesaler_rule is None or wholesaler_rule(row)
         row["Regola Grossisti"] = "SI" if wholesaler_rule_on else ""
-        row["Verifica Anagrafica"] = ""
-        row["Anagrafica Simile"] = ""
         if wholesaler_rule_on:
-            # Dal 01/10/2026 si riconosce il punto di consegna (nome simile + CAP/citta'),
-            # non piu' ogni consegna con lo stesso nome.
-            gdo_match, shipto_status, similar_entries = match_shipto(row, gdo_registry)
-            row["Verifica Anagrafica"] = SHIPTO_STATUS_NOTES.get(shipto_status, "")
-            if shipto_status in (SHIPTO_STATUS_UNLISTED, SHIPTO_STATUS_NAME_ONLY, SHIPTO_STATUS_ADDRESS_ONLY):
-                row["Anagrafica Simile"] = " | ".join(
-                    dict.fromkeys(
-                        f"{entry.name} ({entry.match.customer_type}, CAP {entry.cap or '?'})"
-                        for entry in similar_entries
-                    )
-                )
+            # Dal 01/10/2026: riconoscimento per nome (anche scritto in modo diverso),
+            # CAP e catena, vedi match_customer.
+            gdo_match = match_customer(row, gdo_registry)
         else:
             # Mesi gia' fatturati: stesso riconoscimento di prima (solo nome o indirizzo esatti).
             gdo_match = match_gdo_customer(row, gdo_registry)
