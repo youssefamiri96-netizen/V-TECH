@@ -3913,17 +3913,27 @@ def export_wholesaler_credit_notes(
 
     Tutte le spedizioni con attivo dei mesi fino a settembre vengono ricalcolate con le
     regole di oggi (grossisti riconosciuti anche con il nome scritto in modo diverso o
-    troncato dal report). Due tipi di righe:
-    - "Storno grossista": spedizioni di un grossista, fatturate con l'extra GDO +20%
-      oppure con la sponda (grossista non riconosciuto allora). Dovuto = senza extra GDO e
-      senza sponda (salvo nota SPONDA in anagrafica), con gli altri extra (preavviso BKL,
-      fixed time slot BKV, DKV, ETS, fuel). Credito = fatturato - dovuto.
-    - "DKV non addebitata": spedizioni con data tassativa (DKV) di clienti non GDO ne'
-      grossisti per cui l'extra DKV non e' mai stato fatturato: si addebita il solo extra DKV.
-    La nota di credito di ogni mese e' lo storno dei grossisti meno le DKV da addebitare.
-    Un foglio con una riga per mese e uno con il dettaglio spedizione per spedizione."""
-    rows = load_shipments_from_db(db_path)
+    troncato dal report). Tre tipi di righe:
+    - "Storno grossista": spedizioni di un grossista fatturate con l'extra GDO +20% oppure
+      con la sponda (grossista non riconosciuto allora). Dovuto = senza extra GDO e senza
+      sponda (salvo nota SPONDA in anagrafica), con gli altri extra (preavviso BKL, fixed
+      time slot BKV, DKV, ETS). Credito = fatturato - dovuto (negativo = da addebitare).
+    - "Amazon extra doppio": Amazon con codici misti (BKL | BKV) fatturata con due volte il
+      +40%: si storna la differenza.
+    - "DKV non addebitata": clienti normali con ordine marcato DKV per cui l'extra DKV non e'
+      mai stato fatturato: si addebita il solo extra DKV.
+    Fuel e camion restano quelli dei mesi fatturati: la differenza dipende solo dalle regole
+    sopra. Un foglio con una riga per mese e uno con il dettaglio spedizione per spedizione.
+
+    Non entrano nell'export le spedizioni che oggi risultano GDO ma allora non erano state
+    fatturate come tali (catene fuori elenco): non sono una nota di credito."""
     normalized_month = clean_text(month_key)
+    if normalized_month and normalized_month >= WHOLESALER_RULE_START.strftime("%Y-%m"):
+        raise ValueError(
+            f"Le note di credito riguardano solo i mesi precedenti a {WHOLESALER_RULE_START.strftime('%m/%Y')}: "
+            "da quel mese i grossisti sono gia' calcolati correttamente."
+        )
+    rows = load_shipments_from_db(db_path)
     selected: list[tuple[date, dict[str, Any]]] = []
     for row in rows:
         ref_date = billing_reference_date(row)
@@ -4018,7 +4028,10 @@ def export_wholesaler_credit_notes(
                 credit=credit,
             )
         else:
-            continue  # GDO anche con le regole di oggi: nessuna differenza da stornare
+            # Resta GDO con le regole di oggi, oppure e' una GDO riconosciuta solo ora (catena fuori
+            # elenco, allora fatturata come cliente normale): in nessuno dei due casi c'e' una nota
+            # di credito da emettere.
+            continue
         records.append(record)
     if not records:
         raise ValueError("Nessuna nota di credito da emettere.")
@@ -4058,7 +4071,10 @@ def export_wholesaler_credit_notes(
             "DKV da addebitare",
             lambda items: round(-sum(i["credit"] for i in items if i["kind"] == TYPE_DKV), 2),
         ))
-    month_columns.append(("Nota di credito netta", lambda items: round(sum(i["credit"] for i in items), 2)))
+    month_columns.append((
+        "Nota di credito netta (negativo = da addebitare)",
+        lambda items: round(sum(i["credit"] for i in items), 2),
+    ))
     month_columns.append(("Spedizioni", lambda items: len(items)))
     months_sheet.append(["Mese", *[title for title, _getter in month_columns]])
     by_month: dict[str, list[dict[str, Any]]] = {}
@@ -4074,6 +4090,9 @@ def export_wholesaler_credit_notes(
         money_columns=list(range(2, len(month_columns) + 1)),
         numeric_columns=[len(month_columns) + 1],
     )
+    for column_cells in months_sheet.iter_cols(min_col=len(month_columns) + 1, max_col=len(month_columns) + 1, min_row=2):
+        for cell in column_cells:
+            cell.number_format = "0"
     add_table(months_sheet, "NoteCredito", "TableStyleMedium2", True)
 
     detail_sheet = workbook.create_sheet("Dettaglio")
@@ -4091,7 +4110,7 @@ def export_wholesaler_credit_notes(
         "Pallet fatturati",
         "Fatturato",
         "Dovuto",
-        "Extra stornati (GDO / sponda)",
+        "Extra stornati",
         "Extra da addebitare",
         "Nota di credito (negativo = da addebitare)",
         "Extra fatturati",
@@ -4133,6 +4152,9 @@ def export_wholesaler_credit_notes(
         if isinstance(cell.value, date):
             cell.number_format = "dd/mm/yyyy"
     _style_passive_sheet(detail_sheet, money_columns=[12, 13, 14, 15, 16], numeric_columns=[11])
+    for column_cells in detail_sheet.iter_cols(min_col=11, max_col=11, min_row=2):
+        for cell in column_cells:
+            cell.number_format = "0"
     add_table(detail_sheet, "NoteCreditoDettaglio", "TableStyleMedium4", False)
 
     downloads_dir.mkdir(parents=True, exist_ok=True)

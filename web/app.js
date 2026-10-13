@@ -1535,7 +1535,7 @@ function renderBilling() {
           <button id="saveFuelBtn" type="button">Salva fuel</button>
           <button class="primary" id="exportActiveBtn" type="button">Scarica fatturazione attiva</button>
           <button class="primary" id="exportPassiveBtn" type="button">Scarica passivo vettori</button>
-          <button id="exportCreditNotesBtn" type="button" title="Grossisti fatturati come GDO nei mesi fino a settembre 2026">Note di credito</button>
+          <button id="exportCreditNotesBtn" type="button" title="Note di credito da emettere per i mesi fino a settembre 2026">Note di credito</button>
         </div>
       </div>
 
