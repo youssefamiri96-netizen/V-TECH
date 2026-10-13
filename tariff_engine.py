@@ -7,6 +7,7 @@ import os
 import re
 import unicodedata
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Callable
@@ -139,6 +140,7 @@ BANCALI_A_PERDERE_EXTRA_WEIGHT_KG = BANCALI_A_PERDERE_WEIGHT_KG - BANCALI_REPORT
 BANCALI_SLOT_VOLUME_M3 = 1.20 * 0.80 * 1.20
 BANCALI_DECIMAL_EPSILON = 0.001
 ACTIVE_ETS_REGIONS = {"SICILIA", "SARDEGNA"}
+FTL_MAX_PALLETS = 33  # pallet massimi su un camion completo
 SLA_CUTOFF = time(12, 30)
 SLA_PREP_WITHIN_CUTOFF_HOURS = 48
 SLA_PREP_AFTER_CUTOFF_HOURS = 72
@@ -293,10 +295,247 @@ class GdoCustomerMatch:
     customer_type: str = CUSTOMER_TYPE_GDO
 
 
+# Il report V-Tech tronca "Route to Customer" a 30 caratteri e non porta ne' codice
+# cliente ne' ship-to: il punto di consegna si riconosce da nome simile + CAP/citta'.
+REPORT_CUSTOMER_NAME_MAX_CHARS = 30
+TRUNCATED_NAME_MIN_PREFIX_CHARS = 20
+NAME_FUZZY_MIN_RATIO = 0.90
+
+
+@dataclass(frozen=True)
+class GdoRegistryEntry:
+    name: str  # ragione sociale normalizzata
+    stripped: str  # senza forme societarie
+    match: GdoCustomerMatch
+    cap: str
+    city: str
+    street: str  # indirizzo prima del CAP, normalizzato
+
+
 @dataclass(frozen=True)
 class GdoCustomerRegistry:
     customer_keys: dict[str, GdoCustomerMatch]
     address_keys: dict[str, GdoCustomerMatch]
+    entries: tuple["GdoRegistryEntry", ...] = ()
+
+
+# Forme societarie in piu' rispetto a LEGAL_SUFFIX_TOKENS, usate solo dal riconoscimento
+# dal 01/10/2026 (il vecchio calcolo dei mesi fatturati non deve cambiare).
+EXTRA_LEGAL_SUFFIX_TOKENS = {"SRLS", "SNC", "SAS", "SCARL", "SAPA", "UNIPERSONALE"}
+
+
+def strip_legal_suffixes(normalized: str) -> str:
+    return " ".join(
+        token
+        for token in normalized.split()
+        if token not in LEGAL_SUFFIX_TOKENS and token not in EXTRA_LEGAL_SUFFIX_TOKENS
+    )
+
+
+CAP_PATTERN = re.compile(r"(?<!\d)\d{5}(?!\d)")
+
+
+def parse_location(address: Any) -> tuple[str, str, str]:
+    """(CAP, citta', via) normalizzati da un indirizzo, sia nel formato anagrafica
+    ("VIA ROMA 5 20091 BRESSO") sia in quello del report ", BRESSO, MI, 20091, ITA"."""
+    text = clean_text(address)
+    if not text:
+        return "", "", ""
+    parts = [part.strip() for part in text.split(",")]
+    for index, part in enumerate(parts):
+        if CAP_PATTERN.fullmatch(part) and index >= 1:
+            province_index = index - 1
+            if re.fullmatch(r"[A-Za-z]{2}", parts[province_index]) and province_index >= 1:
+                city = normalize_registry_text(parts[province_index - 1])
+                street = normalize_registry_text(", ".join(parts[: province_index - 1]))
+            else:
+                city = normalize_registry_text(parts[province_index])
+                street = normalize_registry_text(", ".join(parts[:province_index]))
+            return part, city, street
+    normalized = normalize_registry_text(text.replace("\n", " "))
+    caps = CAP_PATTERN.findall(normalized)
+    if not caps:
+        return "", "", ""
+    cap = caps[-1]
+    before, _separator, after = normalized.rpartition(cap)
+    return cap, after.strip(), before.strip()
+
+
+def names_look_alike(shipment_name: str, entry: GdoRegistryEntry) -> bool:
+    """Nome del report e ragione sociale dell'anagrafica sono lo stesso cliente?
+    Tollera punteggiatura, forma societaria, nomi troncati a 30 caratteri, parole in
+    piu' (SOC.COOP.) e piccole differenze di battitura. Da usare insieme al controllo
+    del CAP: da solo non basta per classificare."""
+    normalized = normalize_registry_text(shipment_name)
+    if not normalized:
+        return False
+    if customer_match_keys(normalized) & customer_match_keys(entry.name):
+        return True
+    stripped = strip_legal_suffixes(normalized)
+    if (
+        len(clean_text(shipment_name)) >= REPORT_CUSTOMER_NAME_MAX_CHARS
+        and len(normalized) >= TRUNCATED_NAME_MIN_PREFIX_CHARS
+        and entry.name.startswith(normalized)
+    ):
+        return True
+    shipment_tokens = stripped.split()
+    entry_tokens = entry.stripped.split()
+    shorter, longer = sorted((shipment_tokens, entry_tokens), key=len)
+    if shorter and longer[: len(shorter)] == shorter and len("".join(shorter)) >= 4:
+        return True
+    if len(stripped) >= 6 and len(entry.stripped) >= 6:
+        if SequenceMatcher(None, stripped, entry.stripped).ratio() >= NAME_FUZZY_MIN_RATIO:
+            return True
+    return False
+
+
+def same_location(shipment_cap: str, shipment_city: str, entry: GdoRegistryEntry) -> bool | None:
+    """True/False se il punto di consegna coincide con quello in anagrafica, None se
+    non si puo' verificare (indirizzo senza CAP e senza citta')."""
+    if shipment_cap and entry.cap:
+        return shipment_cap == entry.cap
+    if shipment_city and entry.city:
+        return (
+            shipment_city == entry.city
+            or entry.city.startswith(shipment_city)
+            or shipment_city.startswith(entry.city)
+        )
+    return None
+
+
+# Catene GDO riconoscibili dal solo nome, anche se non sono nel file del cliente: cosi'
+# una GDO non sfugge solo perche' nell'elenco manca quella sede o quella cooperativa.
+GDO_CHAIN_WORDS = (
+    "CONAD", "PAC 2000", "ESSELUNGA", "CARREFOUR", "AUCHAN", "LIDL", "EUROSPIN",
+    "UNIEURO", "MEDIAWORLD", "MEDIA WORLD", "MEDIAMARKT", "MEDIA MARKT", "MEDIAMARKTSATURN",
+    "DESPAR", "ASPIAG", "IPERAL", "FINIPER", "BENNET", "SELEX", "TIGROS", "LEROY MERLIN",
+    "COOP ALLEANZA", "COOP LOMBARDIA", "COOP LIGURIA", "COOP ITALIA", "NOVA COOP",
+    "UNICOOP", "IPERCOOP", "TOYS CENTER", "PRENATAL", "DECATHLON", "BRICO IO", "BRICOMAN",
+)
+GDO_CHAIN_PREFIXES = ("SUPERMERCAT", "IPERMERCAT")
+
+
+def is_gdo_chain_name(name: Any) -> bool:
+    normalized = normalize_registry_text(name)
+    if not normalized:
+        return False
+    padded = f" {normalized} "
+    if any(f" {word} " in padded for word in GDO_CHAIN_WORDS):
+        return True
+    return any(token.startswith(GDO_CHAIN_PREFIXES) for token in normalized.split())
+
+
+def name_match_strength(shipment_name: str, entry: GdoRegistryEntry) -> int:
+    """2 = stesso cliente (nome uguale a meno di punteggiatura e forma societaria, o nome
+    troncato a 30 caratteri dal report); 1 = nome simile (parole in piu', piccoli errori
+    di battitura), da confermare con il CAP; 0 = altro cliente."""
+    normalized = normalize_registry_text(shipment_name)
+    if not normalized:
+        return 0
+    if customer_match_keys(normalized) & customer_match_keys(entry.name):
+        return 2
+    if (
+        len(clean_text(shipment_name)) >= REPORT_CUSTOMER_NAME_MAX_CHARS
+        and len(normalized) >= TRUNCATED_NAME_MIN_PREFIX_CHARS
+        and entry.name.startswith(normalized)
+    ):
+        return 2
+    stripped = strip_legal_suffixes(normalized)
+    if stripped and stripped == entry.stripped:
+        return 2
+    shipment_tokens = stripped.split()
+    entry_tokens = entry.stripped.split()
+    shorter, longer = sorted((shipment_tokens, entry_tokens), key=len)
+    if shorter and longer[: len(shorter)] == shorter and len("".join(shorter)) >= 4:
+        return 1
+    if len(stripped) >= 6 and len(entry.stripped) >= 6:
+        if SequenceMatcher(None, stripped, entry.stripped).ratio() >= NAME_FUZZY_MIN_RATIO:
+            return 1
+    return 0
+
+
+def same_location(shipment_cap: str, shipment_city: str, entry: GdoRegistryEntry) -> bool | None:
+    """True/False se il punto di consegna coincide con quello in anagrafica, None se
+    non si puo' verificare (indirizzo senza CAP e senza citta')."""
+    if shipment_cap and entry.cap:
+        return shipment_cap == entry.cap
+    if shipment_city and entry.city:
+        return (
+            shipment_city == entry.city
+            or entry.city.startswith(shipment_city)
+            or shipment_city.startswith(entry.city)
+        )
+    return None
+
+
+def match_customer(
+    shipment_row: dict[str, Any],
+    registry: GdoCustomerRegistry | None,
+) -> GdoCustomerMatch | None:
+    """Riconoscimento GDO / grossista valido dal 01/10/2026.
+
+    In ordine: nome uguale (tollera virgole, punti, forma societaria, nome troncato a 30
+    caratteri) -> nome simile confermato dal CAP -> solo indirizzo (CAP + via, per le
+    consegne presso magazzini con un altro nome) -> catena GDO riconosciuta dal nome.
+    Il report non ha codice cliente ne' ship-to, quindi nome e indirizzo sono tutto."""
+    names: list[str] = []
+    for column in ("Route to Customer", "Customer", "Cliente"):
+        names.extend(iter_registry_values(shipment_row.get(column)))
+
+    if registry and registry.entries:
+        shipment_cap, shipment_city, shipment_street = parse_location(
+            next(
+                (
+                    clean_text(shipment_row.get(column))
+                    for column in ("Route To Address", "Indirizzo Consegna", "Address")
+                    if clean_text(shipment_row.get(column))
+                ),
+                "",
+            )
+        )
+
+        def best(entries: list[GdoRegistryEntry]) -> GdoCustomerMatch:
+            return next((entry.match for entry in entries if entry.match.active_tail_lift), entries[0].match)
+
+        strengths = [
+            (entry, max((name_match_strength(name, entry) for name in names), default=0))
+            for entry in registry.entries
+        ]
+        strong = [entry for entry, strength in strengths if strength == 2]
+        if strong:
+            located = [entry for entry in strong if same_location(shipment_cap, shipment_city, entry)]
+            return best(located or strong)
+        loose = [
+            entry
+            for entry, strength in strengths
+            if strength == 1 and same_location(shipment_cap, shipment_city, entry) is not False
+        ]
+        if loose:
+            located = [entry for entry in loose if same_location(shipment_cap, shipment_city, entry)]
+            return best(located or loose)
+
+        def street_words(value: str) -> str:
+            return " ".join(token for token in value.split() if not token.isdigit())
+
+        shipment_words = street_words(shipment_street)
+        if shipment_cap and len(shipment_words) >= 8:
+            by_address = [
+                entry
+                for entry in registry.entries
+                if entry.cap == shipment_cap
+                and len(street_words(entry.street)) >= 8
+                and (shipment_words in street_words(entry.street) or street_words(entry.street) in shipment_words)
+            ]
+            if by_address:
+                return best(by_address)
+
+    for name in names:
+        if is_gdo_chain_name(name):
+            return GdoCustomerMatch(
+                label=f"{clean_text(name)} (catena GDO riconosciuta dal nome)",
+                customer_type=CUSTOMER_TYPE_GDO,
+            )
+    return None
 
 
 def load_gdo_customer_registry(path: Path | None) -> GdoCustomerRegistry | None:
@@ -305,6 +544,7 @@ def load_gdo_customer_registry(path: Path | None) -> GdoCustomerRegistry | None:
 
     customer_keys: dict[str, GdoCustomerMatch] = {}
     address_keys: dict[str, GdoCustomerMatch] = {}
+    entries: list[GdoRegistryEntry] = []
     customer_columns = [
         "Ragione Sociale",
         "RAGIONESOCIALE",
@@ -358,8 +598,25 @@ def load_gdo_customer_registry(path: Path | None) -> GdoCustomerRegistry | None:
                 add_match(customer_keys, key)
             for key in customer_match_keys(address):
                 add_match(address_keys, key)
+            normalized_name = normalize_registry_text(customer)
+            if normalized_name:
+                cap, city, street = parse_location(address)
+                entries.append(
+                    GdoRegistryEntry(
+                        name=normalized_name,
+                        stripped=strip_legal_suffixes(normalized_name),
+                        match=match,
+                        cap=cap,
+                        city=city,
+                        street=street,
+                    )
+                )
 
-    return GdoCustomerRegistry(customer_keys=customer_keys, address_keys=address_keys)
+    return GdoCustomerRegistry(
+        customer_keys=customer_keys,
+        address_keys=address_keys,
+        entries=tuple(entries),
+    )
 
 
 def match_gdo_customer(
@@ -596,7 +853,7 @@ def parse_active_extra_settings(wb: Any) -> ActiveExtraSettings:
             settings.phone_preadvise = amount
         elif "waiting time" in normalized and amount is not None:
             settings.waiting_time_hour = amount
-        elif "ets" in normalized and percent is not None:
+        elif re.search(r"\bets\b", normalized) and percent is not None:
             settings.ets_sicily_sardinia_percent = percent
         elif "fix day delivery" in normalized and "amazon" in normalized and percent is not None:
             settings.amazon_bkl_percent = percent
@@ -841,6 +1098,10 @@ class ActiveExtraSettings:
     tail_lift_groupage: float = 10.00
     fixed_time_slot_percent: float = 0.20
     amazon_fixed_time_slot_percent: float = 0.40
+    # DKV (data di consegna tassativa) = "Fixed time slot" del contratto: +20% sulle tariffe
+    # standard, Amazon +40% (confermato dall'utente).
+    dkv_percent: float = 0.20
+    amazon_dkv_percent: float = 0.40
     phone_preadvise: float = 5.00
     waiting_time_hour: float = 0.0
     ets_sicily_sardinia_percent: float = 0.05
@@ -888,13 +1149,35 @@ def active_extra_charges(
     if row_has_any_true(shipment_row, ("2nd delivery", "Seconda Consegna", "Returns", "Reso", "Riconsegna")):
         add_percent("2nd delivery and returns", settings.second_delivery_returns_percent)
 
+    # Amazon: il +40% (fix day / time slot) si addebita una sola volta, anche con codici misti
+    # (BKL | BKV). L'interruttore "Amazon Extra Cumulati" riproduce il vecchio calcolo (80%) e
+    # serve solo all'export delle note di credito per ricostruire quanto era stato fatturato.
+    amazon_extra_added = False
+    stack_amazon_extras = clean_text((shipment_row or {}).get("Amazon Extra Cumulati")).upper() in TRUE_VALUES
+
     if has_freight_code(shipment_row, "BKV") and not is_gdo:
         if is_amazon:
             add_percent("BKV Amazon / fixed time slot", settings.amazon_fixed_time_slot_percent)
+            amazon_extra_added = True
         else:
             add_percent("BKV fixed time slot", settings.fixed_time_slot_percent)
 
-    if has_freight_code(shipment_row, "BKL") and is_amazon:
+    # DKV (data di consegna tassativa) si addebita come la BKV (fixed time slot), dal
+    # 01/10/2026 (stessa data della distinzione GDO / grossisti). Se la spedizione ha
+    # anche BKV il fixed time slot e' uno solo. Per le GDO e' gia' compreso nell'extra GDO.
+    if (
+        clean_text((shipment_row or {}).get("Regola Grossisti")).upper() in TRUE_VALUES
+        and has_freight_code(shipment_row, "DKV")
+        and not has_freight_code(shipment_row, "BKV")
+        and not is_gdo
+    ):
+        if is_amazon:
+            add_percent("DKV Amazon / data tassativa", settings.amazon_dkv_percent)
+            amazon_extra_added = True
+        else:
+            add_percent("DKV data tassativa", settings.dkv_percent)
+
+    if has_freight_code(shipment_row, "BKL") and is_amazon and (stack_amazon_extras or not amazon_extra_added):
         add_percent("Amazon BKL fix day delivery and time slot booking", settings.amazon_bkl_percent)
 
     if requires_active_tail_lift(shipment_row, is_gdo, is_amazon):
@@ -961,6 +1244,39 @@ class ContractSlaResult:
     breach: bool = False
 
 
+ACTIVE_RATE_SHEET = "Rate card+LT for transportation"
+# Nome interno (usato da calculate/transit_hours) -> intestazione accettata, dopo la
+# normalizzazione (minuscolo, a capo e punteggiatura -> spazio). Accetta sia il file
+# vecchio ('Small truck up to 15 pallet', 'FTL', 'Groupage up to 8 pallets', 'Direct')
+# sia quello nuovo ('Small truck max 15 pallet', 'FTL >=16 pallet', 'Groupage max 8
+# pallets', 'Direct >= 9 pallet'). 'Zip code 2-digit' non serve e puo' mancare.
+ACTIVE_RATE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("Province code", r"province code|codice provincia"),
+    *((f"{n} pallet", rf"{n} pallets?") for n in range(1, 9)),
+    ("Small truck up to 15 pallet", r"small truck.*"),
+    ("FTL", r"ftl.*"),
+    ("Groupage up to 8 pallets", r"groupage (?:max|up to) 8 pallets?"),
+    ("Direct", r"direct.*"),
+)
+
+
+def normalize_rate_header(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", clean_text(value).lower()).strip()
+
+
+def map_active_rate_headers(header_cells: Any) -> dict[str, int]:
+    mapping: dict[str, int] = {}
+    for col_idx, cell in enumerate(header_cells):
+        normalized = normalize_rate_header(cell)
+        if not normalized:
+            continue
+        for name, pattern in ACTIVE_RATE_COLUMNS:
+            if name not in mapping and re.fullmatch(pattern, normalized):
+                mapping[name] = col_idx
+                break
+    return mapping
+
+
 class ActiveRateCard:
     def __init__(
         self,
@@ -973,23 +1289,56 @@ class ActiveRateCard:
     @classmethod
     def from_excel(cls, path: Path) -> "ActiveRateCard":
         wb = load_workbook(path, read_only=True, data_only=True)
-        ws = wb["Rate card+LT for transportation"]
-        extra_settings = parse_active_extra_settings(wb)
-        rows = ws.iter_rows(min_row=4, values_only=True)
-        headers = [clean_text(value) for value in next(rows)]
-        rates: dict[str, dict[str, Any]] = {}
+        try:
+            if ACTIVE_RATE_SHEET not in wb.sheetnames:
+                raise ValueError(
+                    f"Rate card attive non valida: manca il foglio '{ACTIVE_RATE_SHEET}' "
+                    f"(fogli trovati: {', '.join(wb.sheetnames)})."
+                )
+            ws = wb[ACTIVE_RATE_SHEET]
+            extra_settings = parse_active_extra_settings(wb)
+            col_map: dict[str, int] | None = None
+            seen_headers: list[str] = []
+            rates: dict[str, dict[str, Any]] = {}
 
-        for values in rows:
-            row = {
-                headers[col_idx]: values[col_idx] if col_idx < len(values) else None
-                for col_idx in range(len(headers))
-            }
-            province_code = clean_text(row.get("Province code")).upper()
-            if not province_code:
-                continue
-            rates[province_code] = row
+            for row_index, values in enumerate(ws.iter_rows(values_only=True)):
+                if col_map is None:
+                    # La riga di intestazione e' la prima (entro le prime 30) con 'Province code':
+                    # non si assume piu' che sia la riga 4 ne' la posizione delle colonne.
+                    if row_index >= 30:
+                        break
+                    candidate = map_active_rate_headers(values)
+                    if "Province code" not in candidate:
+                        continue
+                    seen_headers = [clean_text(value) for value in values if clean_text(value)]
+                    missing = [name for name, _pattern in ACTIVE_RATE_COLUMNS if name not in candidate]
+                    if missing:
+                        raise ValueError(
+                            "Rate card attive non valida: colonne obbligatorie mancanti "
+                            f"({', '.join(missing)}). Intestazioni trovate: "
+                            f"{' | '.join(h.replace(chr(10), ' ') for h in seen_headers)}."
+                        )
+                    col_map = candidate
+                    continue
+                province_code = clean_text(
+                    values[col_map["Province code"]] if col_map["Province code"] < len(values) else None
+                ).upper()
+                if not province_code:
+                    continue
+                rates[province_code] = {
+                    name: values[col_idx] if col_idx < len(values) else None
+                    for name, col_idx in col_map.items()
+                }
+        finally:
+            wb.close()
 
-        wb.close()
+        if col_map is None:
+            raise ValueError(
+                f"Rate card attive non valida: nel foglio '{ACTIVE_RATE_SHEET}' non trovo la riga "
+                "di intestazione con 'Province code'."
+            )
+        if not rates:
+            raise ValueError("Rate card attive non valida: nessuna provincia letta.")
         return cls(rates, extra_settings)
 
     def calculate(
@@ -998,6 +1347,7 @@ class ActiveRateCard:
         pallets: Any,
         shipment_row: dict[str, Any] | None = None,
         active_fuel_rate: float | None = None,
+        split_ftl: bool = False,
     ) -> ActiveRateResult | None:
         province_code = clean_text(province).upper()
         row = self.rates_by_province.get(province_code)
@@ -1005,17 +1355,37 @@ class ActiveRateCard:
         if row is None or pallet_value is None:
             return None
 
-        billed_pallets = max(1, math.ceil(pallet_value))
-        if billed_pallets <= 8:
-            column = f"{billed_pallets} pallet"
-        elif billed_pallets <= 15:
-            column = "Small truck up to 15 pallet"
-        else:
-            column = "FTL"
+        # Tolleranza minima per il rumore dei float (8.0000000000004 pallet non sono 9).
+        billed_pallets = max(1, math.ceil(pallet_value - 1e-6))
 
-        cost = to_float(row.get(column))
-        if cost is None:
-            return None
+        def price_for(pallet_count: int) -> tuple[str, float | None]:
+            if pallet_count <= 8:
+                label_column = f"{pallet_count} pallet"
+            elif pallet_count <= 15:
+                label_column = "Small truck up to 15 pallet"
+            else:
+                label_column = "FTL"
+            return label_column, to_float(row.get(label_column))
+
+        if split_ftl and billed_pallets > FTL_MAX_PALLETS:
+            # Oltre 33 pallet serve piu' di un camion: un FTL per ogni 33 pallet pieni e il resto
+            # prezzato in base ai suoi pallet (stessa tabella).
+            full_trucks, remainder = divmod(billed_pallets, FTL_MAX_PALLETS)
+            ftl_cost = to_float(row.get("FTL"))
+            if ftl_cost is None:
+                return None
+            cost = ftl_cost * full_trucks
+            column = f"{full_trucks} FTL da {FTL_MAX_PALLETS} pallet"
+            if remainder:
+                remainder_column, remainder_cost = price_for(remainder)
+                if remainder_cost is None:
+                    return None
+                cost += remainder_cost
+                column += f" + {remainder} pallet ({remainder_column})"
+        else:
+            column, cost = price_for(billed_pallets)
+            if cost is None:
+                return None
 
         raw_base_cost = round(cost, 2)
         # Gli extra vengono calcolati sul nolo base NON indicizzato (percentuali e
@@ -1754,12 +2124,17 @@ def apply_tariffs_to_shipments(
     gdo_customers_path: Path | None = None,
     fuel_settings_path: Path | None = None,
     wholesaler_rule: Callable[[dict[str, Any]], bool] | None = None,
+    pricing_rule: Callable[[dict[str, Any]], bool] | None = None,
 ) -> None:
     """Calcola attivo/passivo di ogni spedizione.
 
     `wholesaler_rule(row)` stabilisce se per quella spedizione vale la distinzione
     GDO / grossista (True) o la vecchia regola in cui ogni cliente dell'anagrafica
     e' GDO (False). Senza funzione la distinzione vale sempre.
+
+    `pricing_rule(row)` stabilisce se per quella spedizione valgono le regole di prezzo dal
+    01/10/2026 (niente fuel attivo, FTL spezzati oltre 33 pallet). Senza funzione segue
+    `wholesaler_rule`.
     """
     active_card = ActiveRateCard.from_excel(active_rates_path) if active_rates_path else None
     brt_card = BrtPassiveRateCard.from_pdf(brt_passive_pdf_path) if brt_passive_pdf_path else None
@@ -1768,6 +2143,7 @@ def apply_tariffs_to_shipments(
     brt_extra_flags = load_brt_extra_flags(brt_extra_flags_path)
     gdo_registry = load_gdo_customer_registry(gdo_customers_path)
     fuel_settings = load_fuel_settings(fuel_settings_path)
+    customer_match_cache: dict[tuple[str, ...], GdoCustomerMatch | None] = {}
 
     for row in shipment_rows:
         apply_pallet_weight_to_shipment(row)
@@ -1776,11 +2152,28 @@ def apply_tariffs_to_shipments(
         selected_carrier = clean_text(row.get("Carrier Scelto")).upper()
         active_fuel_rate, passive_fuel_rate = fuel_settings_for_row(row, fuel_settings)
 
-        gdo_match = match_gdo_customer(row, gdo_registry)
-        if gdo_match:
-            is_wholesaler = gdo_match.customer_type == CUSTOMER_TYPE_WHOLESALER and (
-                wholesaler_rule is None or wholesaler_rule(row)
+        wholesaler_rule_on = wholesaler_rule is None or wholesaler_rule(row)
+        row["Regola Grossisti"] = "SI" if wholesaler_rule_on else ""
+        effective_pricing_rule = pricing_rule if pricing_rule is not None else wholesaler_rule
+        pricing_rule_on = effective_pricing_rule is None or effective_pricing_rule(row)
+        row["Regola Tariffa"] = "SI" if pricing_rule_on else ""
+        if pricing_rule_on:
+            active_fuel_rate = None  # dal 01/10/2026 niente fuel sull'attivo
+        if wholesaler_rule_on:
+            # Dal 01/10/2026: riconoscimento per nome (anche scritto in modo diverso),
+            # CAP e catena, vedi match_customer.
+            match_key = tuple(
+                clean_text(row.get(column))
+                for column in ("Route to Customer", "Customer", "Cliente", "Route To Address", "Indirizzo Consegna", "Address")
             )
+            if match_key not in customer_match_cache:
+                customer_match_cache[match_key] = match_customer(row, gdo_registry)
+            gdo_match = customer_match_cache[match_key]
+        else:
+            # Mesi gia' fatturati: stesso riconoscimento di prima (solo nome o indirizzo esatti).
+            gdo_match = match_gdo_customer(row, gdo_registry)
+        if gdo_match:
+            is_wholesaler = gdo_match.customer_type == CUSTOMER_TYPE_WHOLESALER and wholesaler_rule_on
             row["Tipo Cliente"] = gdo_match.customer_type
             row["Cliente Grossista"] = "SI" if is_wholesaler else ""
             row["Cliente GDO"] = "" if is_wholesaler else "SI"
@@ -1810,6 +2203,7 @@ def apply_tariffs_to_shipments(
                 row.get("Theoretical Pallets"),
                 shipment_row=row,
                 active_fuel_rate=active_fuel_rate,
+                split_ftl=pricing_rule_on,
             )
             if active_card
             else None

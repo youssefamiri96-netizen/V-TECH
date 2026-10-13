@@ -1940,6 +1940,17 @@ class VTechWebHandler(BaseHTTPRequestHandler):
         content = decode_upload_base64(body.get("contentBase64"))
         target.write_bytes(content)
 
+        if kind == "active":
+            # Valida PRIMA di sostituire la rate card in uso: un file con colonne
+            # sconosciute non deve azzerare silenziosamente l'attivo.
+            from tariff_engine import ActiveRateCard
+
+            try:
+                ActiveRateCard.from_excel(target)
+            except Exception:
+                target.unlink(missing_ok=True)
+                raise
+
         settings = load_settings()
         if kind in UPLOAD_SETTINGS_KEYS:
             settings[UPLOAD_SETTINGS_KEYS[kind]] = str(target)

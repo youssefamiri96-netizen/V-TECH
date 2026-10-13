@@ -560,7 +560,7 @@ def parse_contract_workbook(content: bytes) -> list[dict[str, Any]]:
             normalized = [_norm_header(value) for value in row]
             if header_row is None:
                 code = next((i for i, v in enumerate(normalized) if v in ("province code", "codice provincia")), None)
-                groupage = next((i for i, v in enumerate(normalized) if v.startswith("groupage max")), None)
+                groupage = next((i for i, v in enumerate(normalized) if re.match(r"groupage (max|up to)\b", v)), None)
                 direct = next((i for i, v in enumerate(normalized) if v.startswith("direct")), None)
                 if code is not None and groupage is not None and direct is not None:
                     header_row = index

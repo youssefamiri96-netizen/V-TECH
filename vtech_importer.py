@@ -11,7 +11,7 @@ from typing import Any
 
 from openpyxl import load_workbook
 
-from tariff_engine import apply_tariffs_to_shipments
+from tariff_engine import WHOLESALER_RULE_START, apply_tariffs_to_shipments, parse_datetime_value
 
 
 HEADER_ROW = 8
@@ -783,6 +783,16 @@ def build_summary(rows: list[dict[str, Any]], shipment_rows: list[dict[str, Any]
     }
 
 
+def wholesaler_rule_applies(row: dict[str, Any]) -> bool:
+    """Come nell'app: la distinzione GDO / grossista vale dalla data di partenza
+    (Dispatch Date, altrimenti Late Ship Date) in poi; senza date vale la nuova regola."""
+    for column in ("Dispatch Date", "Late Ship Date"):
+        parsed = parse_datetime_value(row.get(column))
+        if parsed is not None:
+            return parsed.date() >= WHOLESALER_RULE_START
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Importa il report outbound V-Tech e crea tabelle pulite.")
     parser.add_argument("input", type=Path, help="Percorso del file Excel V-Tech.")
@@ -805,6 +815,7 @@ def main() -> None:
         brt_extra_flags_path=args.brt_extra_flags,
         gdo_customers_path=args.gdo_customers,
         fuel_settings_path=args.fuel_settings,
+        wholesaler_rule=wholesaler_rule_applies,
     )
     write_csv(rows, args.output, REQUIRED_COLUMNS)
     write_csv(shipment_rows, args.shipments_output, SHIPMENT_COLUMNS)
