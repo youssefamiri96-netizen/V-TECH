@@ -3887,14 +3887,17 @@ def export_wholesaler_credit_notes(
 ) -> Path:
     """Note di credito da emettere per i mesi precedenti a WHOLESALER_RULE_START.
 
-    Due tipi di righe, ricalcolate con le regole di oggi:
-    - "Storno GDO": spedizioni fatturate con l'extra GDO +20% che non spettava (grossisti).
-      Dovuto = senza extra GDO e senza sponda, con gli altri extra (preavviso BKL, fixed
-      time slot BKV, DKV, ETS, fuel). Credito = fatturato - dovuto.
-    - "DKV non addebitata": spedizioni con data tassativa (DKV) di clienti non GDO per cui
-      l'extra DKV non e' mai stato fatturato. Importo da addebitare = solo l'extra DKV.
-    La nota di credito di ogni mese e' lo storno GDO meno le DKV da addebitare. Un foglio
-    con una riga per mese e uno con il dettaglio spedizione per spedizione."""
+    Tutte le spedizioni con attivo dei mesi fino a settembre vengono ricalcolate con le
+    regole di oggi (grossisti riconosciuti anche con il nome scritto in modo diverso o
+    troncato dal report). Due tipi di righe:
+    - "Storno grossista": spedizioni di un grossista, fatturate con l'extra GDO +20%
+      oppure con la sponda (grossista non riconosciuto allora). Dovuto = senza extra GDO e
+      senza sponda (salvo nota SPONDA in anagrafica), con gli altri extra (preavviso BKL,
+      fixed time slot BKV, DKV, ETS, fuel). Credito = fatturato - dovuto.
+    - "DKV non addebitata": spedizioni con data tassativa (DKV) di clienti non GDO ne'
+      grossisti per cui l'extra DKV non e' mai stato fatturato: si addebita il solo extra DKV.
+    La nota di credito di ogni mese e' lo storno dei grossisti meno le DKV da addebitare.
+    Un foglio con una riga per mese e uno con il dettaglio spedizione per spedizione."""
     rows = load_shipments_from_db(db_path)
     normalized_month = clean_text(month_key)
     selected: list[tuple[date, dict[str, Any]]] = []
@@ -3907,14 +3910,11 @@ def export_wholesaler_credit_notes(
         billed = to_float(row.get("Costo Attivo"))
         if billed is None or billed <= 0:
             continue
-        billed_as_gdo = clean_text(row.get("Cliente GDO")).upper() in {"SI", "S", "TRUE", "1"}
-        if not billed_as_gdo and not has_freight_code(row, "DKV"):
-            continue
         selected.append((ref_date, row))
 
     if not selected:
         label = normalized_month or f"i mesi precedenti a {WHOLESALER_RULE_START.strftime('%m/%Y')}"
-        raise ValueError(f"Nessuna spedizione fatturata come GDO o con DKV per {label}.")
+        raise ValueError(f"Nessuna spedizione con attivo per {label}.")
 
     active_rates_path = resolve_active_rates_path()
     if active_rates_path is None:
@@ -3929,7 +3929,7 @@ def export_wholesaler_credit_notes(
         wholesaler_rule=lambda _row: True,
     )
 
-    TYPE_GDO = "Storno GDO"
+    TYPE_GDO = "Storno grossista"
     TYPE_DKV = "DKV non addebitata"
     records: list[dict[str, Any]] = []
     for (ref_date, old_row), new_row in zip(selected, corrected_rows):
@@ -3948,21 +3948,25 @@ def export_wholesaler_credit_notes(
             "old_extras": clean_text(old_row.get("Extra Attivi Applicati")),
             "new_extras": clean_text(new_row.get("Extra Attivi Applicati")),
         }
-        if clean_text(old_row.get("Cliente GDO")).upper() in {"SI", "S", "TRUE", "1"}:
-            if clean_text(new_row.get("Cliente GDO")).upper() == "SI":
-                continue  # resta GDO anche con le regole di oggi: nessuna nota di credito
+        old_is_gdo = clean_text(old_row.get("Cliente GDO")).upper() in {"SI", "S", "TRUE", "1"}
+        new_is_gdo = clean_text(new_row.get("Cliente GDO")).upper() in {"SI", "S", "TRUE", "1"}
+        new_is_wholesaler = clean_text(new_row.get("Cliente Grossista")).upper() in {"SI", "S", "TRUE", "1"}
+        if new_is_wholesaler or (old_is_gdo and not new_is_gdo):
+            credit = round(billed - corrected, 2)
+            if abs(credit) < 0.005:
+                continue  # nessuna differenza (es. BKV: il +20% GDO e' sostituito dal +20% fixed time slot)
             labels = set(old_extras) | set(new_extras)
             record.update(
                 kind=TYPE_GDO,
                 corrected=corrected,
                 removed=round(sum(max(old_extras.get(label, 0) - new_extras.get(label, 0), 0) for label in labels), 2),
                 added=round(sum(max(new_extras.get(label, 0) - old_extras.get(label, 0), 0) for label in labels), 2),
-                credit=round(billed - corrected, 2),
+                credit=credit,
             )
-        else:
+        elif not old_is_gdo and not new_is_gdo:
             dkv_amount = round(new_extras.get("DKV data tassativa", 0), 2)
             if dkv_amount <= 0:
-                continue  # GDO riconosciuta oggi, o nessun extra DKV applicabile
+                continue
             record.update(
                 kind=TYPE_DKV,
                 corrected=round(billed + dkv_amount, 2),
@@ -3970,6 +3974,8 @@ def export_wholesaler_credit_notes(
                 added=dkv_amount,
                 credit=round(-dkv_amount, 2),
             )
+        else:
+            continue  # GDO anche con le regole di oggi: nessuna differenza da stornare
         records.append(record)
     if not records:
         raise ValueError("Nessuna nota di credito da emettere e nessuna DKV da addebitare.")
@@ -3996,8 +4002,8 @@ def export_wholesaler_credit_notes(
     months_sheet.title = "Note di credito"
     months_sheet.append([
         "Mese",
-        "Spedizioni storno GDO",
-        "Storno GDO",
+        "Spedizioni storno grossisti",
+        "Storno grossisti",
         "Spedizioni DKV",
         "DKV da addebitare",
         "Nota di credito netta",
@@ -4032,7 +4038,7 @@ def export_wholesaler_credit_notes(
         "Pallet fatturati",
         "Fatturato",
         "Dovuto",
-        "Extra GDO stornati",
+        "Extra stornati (GDO / sponda)",
         "Extra da addebitare",
         "Nota di credito (negativo = da addebitare)",
         "Extra fatturati",

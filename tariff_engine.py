@@ -2043,6 +2043,7 @@ def apply_tariffs_to_shipments(
     brt_extra_flags = load_brt_extra_flags(brt_extra_flags_path)
     gdo_registry = load_gdo_customer_registry(gdo_customers_path)
     fuel_settings = load_fuel_settings(fuel_settings_path)
+    customer_match_cache: dict[tuple[str, ...], GdoCustomerMatch | None] = {}
 
     for row in shipment_rows:
         apply_pallet_weight_to_shipment(row)
@@ -2056,7 +2057,13 @@ def apply_tariffs_to_shipments(
         if wholesaler_rule_on:
             # Dal 01/10/2026: riconoscimento per nome (anche scritto in modo diverso),
             # CAP e catena, vedi match_customer.
-            gdo_match = match_customer(row, gdo_registry)
+            match_key = tuple(
+                clean_text(row.get(column))
+                for column in ("Route to Customer", "Customer", "Cliente", "Route To Address", "Indirizzo Consegna", "Address")
+            )
+            if match_key not in customer_match_cache:
+                customer_match_cache[match_key] = match_customer(row, gdo_registry)
+            gdo_match = customer_match_cache[match_key]
         else:
             # Mesi gia' fatturati: stesso riconoscimento di prima (solo nome o indirizzo esatti).
             gdo_match = match_gdo_customer(row, gdo_registry)
