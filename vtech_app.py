@@ -3956,10 +3956,12 @@ def export_wholesaler_credit_notes(
     # Il fuel non fa parte del calcolo (fuel_settings_path=None): entra allo stesso modo in
     # fatturato e dovuto, quindi la differenza non cambia, ma gli importi sono quelli senza fuel.
     # "Fatturato": come era calcolato fino a settembre, compreso il vecchio doppio extra Amazon
-    # (BKL | BKV = +80%) che oggi e' corretto a +40%.
+    # (BKL | BKV = +80%) che oggi e' corretto a +40% e il preavviso telefonico addebitato una volta
+    # per shipment anziche' per consegna.
     old_rows = [copy.deepcopy(row) for _ref_date, row in selected]
     for old_row in old_rows:
         old_row["Amazon Extra Cumulati"] = "SI"
+        old_row["Preavviso Per Spedizione"] = "SI"
     apply_tariffs_to_shipments(
         old_rows,
         active_rates_path=active_rates_path,
@@ -3985,6 +3987,8 @@ def export_wholesaler_credit_notes(
     TYPE_DKV = "DKV non addebitata"
     TYPE_AMAZON = "Amazon extra doppio"
     TYPE_GDO_DUE = "GDO da addebitare"
+    TYPE_PREADVISE = "Preavviso per delivery"
+    TYPE_OTHER = "Altre differenze"
     records: list[dict[str, Any]] = []
     for (ref_date, _loaded_row), old_row, new_row in zip(selected, old_rows, corrected_rows):
         billed = round(to_float(old_row.get("Costo Attivo")) or 0, 2)
@@ -4012,6 +4016,7 @@ def export_wholesaler_credit_notes(
             labels = set(old_extras) | set(new_extras)
             record.update(
                 kind=TYPE_GDO,
+                components={TYPE_GDO: credit},
                 corrected=corrected,
                 removed=round(sum(max(old_extras.get(label, 0) - new_extras.get(label, 0), 0) for label in labels), 2),
                 added=round(sum(max(new_extras.get(label, 0) - old_extras.get(label, 0), 0) for label in labels), 2),
@@ -4026,20 +4031,32 @@ def export_wholesaler_credit_notes(
             labels = set(old_extras) | set(new_extras)
             record.update(
                 kind=TYPE_GDO_DUE,
+                components={TYPE_GDO_DUE: credit},
                 corrected=corrected,
                 removed=round(sum(max(old_extras.get(label, 0) - new_extras.get(label, 0), 0) for label in labels), 2),
                 added=round(sum(max(new_extras.get(label, 0) - old_extras.get(label, 0), 0) for label in labels), 2),
                 credit=credit,
             )
         elif not old_is_gdo and not new_is_gdo:
-            # Cliente normale con le regole di oggi come con quelle di allora: le uniche differenze
-            # possibili sono la DKV mai addebitata (da addebitare) e il doppio extra Amazon (da stornare).
+            # Cliente normale: con le regole di oggi come con quelle di allora le uniche differenze
+            # possibili sono il doppio extra Amazon (da stornare), la DKV mai addebitata e il
+            # preavviso telefonico per consegna (prima una volta per shipment): da addebitare.
             credit = round(billed - corrected, 2)
             if abs(credit) < 0.005:
                 continue
+            components = {
+                TYPE_AMAZON: round(old_extras.get("Amazon booking", 0) - new_extras.get("Amazon booking", 0), 2),
+                TYPE_DKV: round(old_extras.get("DKV data tassativa", 0) - new_extras.get("DKV data tassativa", 0), 2),
+                TYPE_PREADVISE: round(old_extras.get("Preavviso", 0) - new_extras.get("Preavviso", 0), 2),
+            }
+            residual = round(credit - sum(components.values()), 2)
+            if abs(residual) >= 0.005:
+                components[TYPE_OTHER] = residual
+            components = {name: value for name, value in components.items() if abs(value) >= 0.005}
             labels = set(old_extras) | set(new_extras)
             record.update(
-                kind=TYPE_DKV if credit < 0 else TYPE_AMAZON,
+                kind=" + ".join(components) or TYPE_OTHER,
+                components=components or {TYPE_OTHER: credit},
                 corrected=corrected,
                 removed=round(sum(max(old_extras.get(label, 0) - new_extras.get(label, 0), 0) for label in labels), 2),
                 added=round(sum(max(new_extras.get(label, 0) - old_extras.get(label, 0), 0) for label in labels), 2),
@@ -4072,26 +4089,23 @@ def export_wholesaler_credit_notes(
     workbook = Workbook()
     months_sheet = workbook.active
     months_sheet.title = "Note di credito"
-    # Le colonne Amazon e DKV compaiono solo se ci sono davvero righe di quel tipo.
-    kinds_present = {record["kind"] for record in records}
+    # Le colonne diverse da "Storno grossisti" compaiono solo se ci sono davvero righe di quel tipo.
+    def component_total(items: list[dict[str, Any]], name: str, sign: int = 1) -> float:
+        return round(sign * sum(i["components"].get(name, 0) for i in items), 2)
+
+    components_present = {name for record in records for name in record["components"]}
     month_columns: list[tuple[str, Any]] = [
-        ("Storno grossisti", lambda items: round(sum(i["credit"] for i in items if i["kind"] == TYPE_GDO), 2)),
+        ("Storno grossisti", lambda items: component_total(items, TYPE_GDO)),
     ]
-    if TYPE_AMAZON in kinds_present:
-        month_columns.append((
-            "Storno Amazon (extra doppio)",
-            lambda items: round(sum(i["credit"] for i in items if i["kind"] == TYPE_AMAZON), 2),
-        ))
-    if TYPE_GDO_DUE in kinds_present:
-        month_columns.append((
-            "GDO da addebitare",
-            lambda items: round(-sum(i["credit"] for i in items if i["kind"] == TYPE_GDO_DUE), 2),
-        ))
-    if TYPE_DKV in kinds_present:
-        month_columns.append((
-            "DKV da addebitare",
-            lambda items: round(-sum(i["credit"] for i in items if i["kind"] == TYPE_DKV), 2),
-        ))
+    for name, title, sign in (
+        (TYPE_GDO_DUE, "GDO da addebitare", -1),
+        (TYPE_AMAZON, "Storno Amazon (extra doppio)", 1),
+        (TYPE_DKV, "DKV da addebitare", -1),
+        (TYPE_PREADVISE, "Preavviso per delivery da addebitare", -1),
+        (TYPE_OTHER, "Altre differenze", 1),
+    ):
+        if name in components_present:
+            month_columns.append((title, lambda items, name=name, sign=sign: component_total(items, name, sign)))
     month_columns.append((
         "Nota di credito netta (negativo = da addebitare)",
         lambda items: round(sum(i["credit"] for i in items), 2),
