@@ -995,6 +995,17 @@ def has_freight_code(row: dict[str, Any] | None, code: str) -> bool:
     return False
 
 
+def count_deliveries(row: dict[str, Any] | None) -> int:
+    """Consegne (delivery) di uno shipment: un ordine = una consegna, come nel resto del programma
+    (XML di consegna, export per ordine). Lo shipment senza ordini conta una consegna."""
+    orders: set[str] = set()
+    for part in re.split(r"\s*\|\s*|[,;\r\n]+", clean_text((row or {}).get("Orders"))):
+        order = clean_text(part)
+        if order:
+            orders.add(order)
+    return max(1, len(orders))
+
+
 def is_dkv_shipment(row: dict[str, Any] | None) -> bool:
     """DKV (data di consegna tassativa) dal solo Freight Code o dal freight impostato a mano:
     niente ricerca nei testi liberi (note, wave), dove 'NO DKV' non deve scatenare l'extra."""
@@ -1253,7 +1264,15 @@ def active_extra_charges(
         add_fixed("Sponda idraulica groupage", settings.tail_lift_groupage)
 
     if has_freight_code(shipment_row, "BKL") and not is_gdo and not is_amazon:
-        add_fixed("Phone preadvise BKL", settings.phone_preadvise)
+        # Preavviso telefonico: 5 EUR per consegna (contratto: "5 EUR/delivery"), non per shipment.
+        # L'interruttore "Preavviso Per Spedizione" riproduce il vecchio calcolo (una volta per
+        # shipment) e serve solo all'export delle note di credito per ricostruire il fatturato.
+        legacy_per_shipment = clean_text((shipment_row or {}).get("Preavviso Per Spedizione")).upper() in TRUE_VALUES
+        deliveries = 1 if legacy_per_shipment else count_deliveries(shipment_row)
+        add_fixed(
+            "Phone preadvise BKL" if deliveries == 1 else f"Phone preadvise BKL ({deliveries} delivery)",
+            settings.phone_preadvise * deliveries,
+        )
 
     if is_active_urgent(shipment_row):
         add_fixed("Urgent delivery", settings.urgent_per_pallet * max(1, billed_pallets))
