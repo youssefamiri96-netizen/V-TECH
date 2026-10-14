@@ -6,7 +6,7 @@ import math
 import os
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -303,6 +303,18 @@ NAME_FUZZY_MIN_RATIO = 0.90
 
 
 @dataclass(frozen=True)
+class NameFeatures:
+    """Un nome cliente scomposto una volta sola, cosi' il confronto con le ~80 voci
+    dell'anagrafica non rifa' ogni volta normalizzazione e chiavi."""
+
+    raw_length: int
+    normalized: str
+    keys: frozenset[str]
+    stripped: str
+    tokens: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class GdoRegistryEntry:
     name: str  # ragione sociale normalizzata
     stripped: str  # senza forme societarie
@@ -310,6 +322,7 @@ class GdoRegistryEntry:
     cap: str
     city: str
     street: str  # indirizzo prima del CAP, normalizzato
+    features: NameFeatures | None = None
 
 
 @dataclass(frozen=True)
@@ -317,6 +330,9 @@ class GdoCustomerRegistry:
     customer_keys: dict[str, GdoCustomerMatch]
     address_keys: dict[str, GdoCustomerMatch]
     entries: tuple["GdoRegistryEntry", ...] = ()
+    # Esito del riconoscimento per (nome, indirizzo): vale finche' il file clienti e' lo stesso,
+    # quindi sopravvive ai ricaricamenti dell'elenco spedizioni.
+    match_cache: dict = field(default_factory=dict, compare=False, repr=False)
 
 
 # Forme societarie in piu' rispetto a LEGAL_SUFFIX_TOKENS, usate solo dal riconoscimento
@@ -425,32 +441,52 @@ def is_gdo_chain_name(name: Any) -> bool:
     return any(token.startswith(GDO_CHAIN_PREFIXES) for token in normalized.split())
 
 
-def name_match_strength(shipment_name: str, entry: GdoRegistryEntry) -> int:
+def name_features(name: Any) -> NameFeatures | None:
+    normalized = normalize_registry_text(name)
+    if not normalized:
+        return None
+    stripped = strip_legal_suffixes(normalized)
+    return NameFeatures(
+        raw_length=len(clean_text(name)),
+        normalized=normalized,
+        keys=frozenset(customer_match_keys(normalized)),
+        stripped=stripped,
+        tokens=tuple(stripped.split()),
+    )
+
+
+def name_match_strength(shipment: NameFeatures, entry: GdoRegistryEntry) -> int:
     """2 = stesso cliente (nome uguale a meno di punteggiatura e forma societaria, o nome
     troncato a 30 caratteri dal report); 1 = nome simile (parole in piu', piccoli errori
     di battitura), da confermare con il CAP; 0 = altro cliente."""
-    normalized = normalize_registry_text(shipment_name)
-    if not normalized:
+    entry_features = entry.features
+    if entry_features is None:
         return 0
-    if customer_match_keys(normalized) & customer_match_keys(entry.name):
+    if shipment.keys & entry_features.keys:
         return 2
     if (
-        len(clean_text(shipment_name)) >= REPORT_CUSTOMER_NAME_MAX_CHARS
-        and len(normalized) >= TRUNCATED_NAME_MIN_PREFIX_CHARS
-        and entry.name.startswith(normalized)
+        shipment.raw_length >= REPORT_CUSTOMER_NAME_MAX_CHARS
+        and len(shipment.normalized) >= TRUNCATED_NAME_MIN_PREFIX_CHARS
+        and entry.name.startswith(shipment.normalized)
     ):
         return 2
-    stripped = strip_legal_suffixes(normalized)
-    if stripped and stripped == entry.stripped:
+    if shipment.stripped and shipment.stripped == entry.stripped:
         return 2
-    shipment_tokens = stripped.split()
-    entry_tokens = entry.stripped.split()
-    shorter, longer = sorted((shipment_tokens, entry_tokens), key=len)
+    shorter, longer = sorted((shipment.tokens, entry_features.tokens), key=len)
     if shorter and longer[: len(shorter)] == shorter and len("".join(shorter)) >= 4:
         return 1
-    if len(stripped) >= 6 and len(entry.stripped) >= 6:
-        if SequenceMatcher(None, stripped, entry.stripped).ratio() >= NAME_FUZZY_MIN_RATIO:
-            return 1
+    a, b = shipment.stripped, entry.stripped
+    if len(a) >= 6 and len(b) >= 6:
+        # Il rapporto di somiglianza non puo' superare 2*min/(la+lb): se gia' quel tetto e'
+        # sotto soglia (o lo e' una stima piu' fine) si evita il confronto completo.
+        if 2 * min(len(a), len(b)) / (len(a) + len(b)) >= NAME_FUZZY_MIN_RATIO:
+            matcher = SequenceMatcher(None, a, b)
+            if (
+                matcher.real_quick_ratio() >= NAME_FUZZY_MIN_RATIO
+                and matcher.quick_ratio() >= NAME_FUZZY_MIN_RATIO
+                and matcher.ratio() >= NAME_FUZZY_MIN_RATIO
+            ):
+                return 1
     return 0
 
 
@@ -471,6 +507,7 @@ def same_location(shipment_cap: str, shipment_city: str, entry: GdoRegistryEntry
 def match_customer(
     shipment_row: dict[str, Any],
     registry: GdoCustomerRegistry | None,
+    allow_chain_names: bool = True,
 ) -> GdoCustomerMatch | None:
     """Riconoscimento GDO / grossista valido dal 01/10/2026.
 
@@ -497,8 +534,9 @@ def match_customer(
         def best(entries: list[GdoRegistryEntry]) -> GdoCustomerMatch:
             return next((entry.match for entry in entries if entry.match.active_tail_lift), entries[0].match)
 
+        shipment_names = [features for features in (name_features(name) for name in names) if features]
         strengths = [
-            (entry, max((name_match_strength(name, entry) for name in names), default=0))
+            (entry, max((name_match_strength(features, entry) for features in shipment_names), default=0))
             for entry in registry.entries
         ]
         strong = [entry for entry, strength in strengths if strength == 2]
@@ -529,7 +567,7 @@ def match_customer(
             if by_address:
                 return best(by_address)
 
-    for name in names:
+    for name in names if allow_chain_names else ():
         if is_gdo_chain_name(name):
             return GdoCustomerMatch(
                 label=f"{clean_text(name)} (catena GDO riconosciuta dal nome)",
@@ -538,8 +576,29 @@ def match_customer(
     return None
 
 
+_REGISTRY_CACHE: dict[str, tuple[tuple[int, int], GdoCustomerRegistry | None]] = {}
+
+
 def load_gdo_customer_registry(path: Path | None) -> GdoCustomerRegistry | None:
+    """Anagrafica GDO / grossisti, riletta solo quando il file cambia (insieme al suo
+    archivio di riconoscimenti gia' fatti)."""
     if not path or not path.exists():
+        return None
+    try:
+        stat = path.stat()
+        signature = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return build_gdo_customer_registry(path)
+    cached = _REGISTRY_CACHE.get(str(path))
+    if cached and cached[0] == signature:
+        return cached[1]
+    registry = build_gdo_customer_registry(path)
+    _REGISTRY_CACHE[str(path)] = (signature, registry)
+    return registry
+
+
+def build_gdo_customer_registry(path: Path) -> GdoCustomerRegistry | None:
+    if not path.exists():
         return None
 
     customer_keys: dict[str, GdoCustomerMatch] = {}
@@ -609,6 +668,7 @@ def load_gdo_customer_registry(path: Path | None) -> GdoCustomerRegistry | None:
                         cap=cap,
                         city=city,
                         street=street,
+                        features=name_features(customer),
                     )
                 )
 
@@ -935,6 +995,15 @@ def has_freight_code(row: dict[str, Any] | None, code: str) -> bool:
     return False
 
 
+def is_dkv_shipment(row: dict[str, Any] | None) -> bool:
+    """DKV (data di consegna tassativa) dal solo Freight Code o dal freight impostato a mano:
+    niente ricerca nei testi liberi (note, wave), dove 'NO DKV' non deve scatenare l'extra."""
+    if not row:
+        return False
+    tokens = re.split(r"[^A-Z0-9]+", clean_text(row.get("Freight Code")).upper())
+    return "DKV" in tokens or clean_text(row.get("Freight Code Manuale")).upper() == "DKV"
+
+
 def is_amazon_customer(row: dict[str, Any] | None) -> bool:
     if not row:
         return False
@@ -1167,7 +1236,7 @@ def active_extra_charges(
     # anche BKV il fixed time slot e' uno solo. Per le GDO e' gia' compreso nell'extra GDO.
     if (
         clean_text((shipment_row or {}).get("Regola Grossisti")).upper() in TRUE_VALUES
-        and has_freight_code(shipment_row, "DKV")
+        and is_dkv_shipment(shipment_row)
         and not has_freight_code(shipment_row, "BKV")
         and not is_gdo
     ):
@@ -1367,10 +1436,13 @@ class ActiveRateCard:
                 label_column = "FTL"
             return label_column, to_float(row.get(label_column))
 
-        if split_ftl and billed_pallets > FTL_MAX_PALLETS:
+        # Per decidere se serve un secondo camion si usa la stessa tolleranza dei pallet fisici
+        # (0,001): 33,0004 pallet teorici sono 33 pallet, non 33 + 1.
+        split_pallets = max(1, math.ceil(pallet_value - BANCALI_DECIMAL_EPSILON))
+        if split_ftl and split_pallets > FTL_MAX_PALLETS:
             # Oltre 33 pallet serve piu' di un camion: un FTL per ogni 33 pallet pieni e il resto
             # prezzato in base ai suoi pallet (stessa tabella).
-            full_trucks, remainder = divmod(billed_pallets, FTL_MAX_PALLETS)
+            full_trucks, remainder = divmod(split_pallets, FTL_MAX_PALLETS)
             ftl_cost = to_float(row.get("FTL"))
             if ftl_cost is None:
                 return None
@@ -1381,7 +1453,9 @@ class ActiveRateCard:
                 if remainder_cost is None:
                     return None
                 cost += remainder_cost
-                column += f" + {remainder} pallet ({remainder_column})"
+                column += f" + {remainder} pallet" + (
+                    "" if remainder_column == f"{remainder} pallet" else f" ({remainder_column})"
+                )
         else:
             column, cost = price_for(billed_pallets)
             if cost is None:
@@ -2125,12 +2199,16 @@ def apply_tariffs_to_shipments(
     fuel_settings_path: Path | None = None,
     wholesaler_rule: Callable[[dict[str, Any]], bool] | None = None,
     pricing_rule: Callable[[dict[str, Any]], bool] | None = None,
+    chain_names: bool = True,
 ) -> None:
     """Calcola attivo/passivo di ogni spedizione.
 
     `wholesaler_rule(row)` stabilisce se per quella spedizione vale la distinzione
     GDO / grossista (True) o la vecchia regola in cui ogni cliente dell'anagrafica
     e' GDO (False). Senza funzione la distinzione vale sempre.
+
+    `chain_names=False` limita il riconoscimento GDO ai soli clienti del file anagrafica (niente
+    catene riconosciute dal nome): serve al ricalcolo delle note di credito sui mesi passati.
 
     `pricing_rule(row)` stabilisce se per quella spedizione valgono le regole di prezzo dal
     01/10/2026 (niente fuel attivo, FTL spezzati oltre 33 pallet). Senza funzione segue
@@ -2143,7 +2221,9 @@ def apply_tariffs_to_shipments(
     brt_extra_flags = load_brt_extra_flags(brt_extra_flags_path)
     gdo_registry = load_gdo_customer_registry(gdo_customers_path)
     fuel_settings = load_fuel_settings(fuel_settings_path)
-    customer_match_cache: dict[tuple[str, ...], GdoCustomerMatch | None] = {}
+    customer_match_cache: dict[tuple[str, ...], GdoCustomerMatch | None] = (
+        gdo_registry.match_cache if gdo_registry is not None else {}
+    )
 
     for row in shipment_rows:
         apply_pallet_weight_to_shipment(row)
@@ -2162,12 +2242,12 @@ def apply_tariffs_to_shipments(
         if wholesaler_rule_on:
             # Dal 01/10/2026: riconoscimento per nome (anche scritto in modo diverso),
             # CAP e catena, vedi match_customer.
-            match_key = tuple(
+            match_key = (str(chain_names),) + tuple(
                 clean_text(row.get(column))
                 for column in ("Route to Customer", "Customer", "Cliente", "Route To Address", "Indirizzo Consegna", "Address")
             )
             if match_key not in customer_match_cache:
-                customer_match_cache[match_key] = match_customer(row, gdo_registry)
+                customer_match_cache[match_key] = match_customer(row, gdo_registry, allow_chain_names=chain_names)
             gdo_match = customer_match_cache[match_key]
         else:
             # Mesi gia' fatturati: stesso riconoscimento di prima (solo nome o indirizzo esatti).
