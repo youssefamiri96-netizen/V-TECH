@@ -11,7 +11,7 @@ from typing import Any
 
 from openpyxl import load_workbook
 
-from tariff_engine import WHOLESALER_RULE_START, apply_tariffs_to_shipments, parse_datetime_value
+from tariff_engine import ACTIVE_ISTAT_START, WHOLESALER_RULE_START, apply_tariffs_to_shipments, parse_datetime_value
 
 
 HEADER_ROW = 8
@@ -793,6 +793,15 @@ def wholesaler_rule_applies(row: dict[str, Any]) -> bool:
     return True
 
 
+def istat_rule_applies(row: dict[str, Any]) -> bool:
+    """Indice ISTAT dalla competenza di luglio 2026 (data di partenza, altrimenti Late Ship Date)."""
+    for column in ("Dispatch Date", "Late Ship Date"):
+        parsed = parse_datetime_value(row.get(column))
+        if parsed is not None:
+            return parsed.date() >= ACTIVE_ISTAT_START
+    return True
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Importa il report outbound V-Tech e crea tabelle pulite.")
     parser.add_argument("input", type=Path, help="Percorso del file Excel V-Tech.")
@@ -816,6 +825,7 @@ def main() -> None:
         gdo_customers_path=args.gdo_customers,
         fuel_settings_path=args.fuel_settings,
         wholesaler_rule=wholesaler_rule_applies,
+        istat_rule=istat_rule_applies,
     )
     write_csv(rows, args.output, REQUIRED_COLUMNS)
     write_csv(shipment_rows, args.shipments_output, SHIPMENT_COLUMNS)
