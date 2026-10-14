@@ -48,6 +48,7 @@ from vtech_app import (
     delete_shipments_permanently,
     display_value,
     export_active_billing_report,
+    export_wholesaler_credit_notes,
     export_passive_billing_by_carrier,
     export_planned_shipments,
     find_outbound_reports,
@@ -84,6 +85,19 @@ from vtech_app import (
     set_unload_date,
     to_float,
     update_planned_date,
+)
+from vtech_otd import (
+    add_booked_destination,
+    delete_booked_destination,
+    delete_lead_time,
+    export_otd_report,
+    import_contract_lead_times,
+    import_lead_times,
+    import_otm_events,
+    init_otd_db,
+    otd_payload,
+    set_lead_time,
+    set_override,
 )
 from vtech_claims import (
     add_claim_attachment,
@@ -147,6 +161,7 @@ ADMIN_POST_PATHS = {"/api/users"}
 BILLING_POST_PATHS = {
     "/api/passive-export",
     "/api/active-export",
+    "/api/credit-notes-export",
     "/api/fuel-settings",
     "/api/open-path",
 }
@@ -162,6 +177,7 @@ FULL_POST_PATHS = {
     "/api/scan-downloads",
     "/api/action",
     "/api/warehouse-pallets-audit-export",
+    "/api/otd",
 }
 UPLOAD_SETTINGS_KEYS = {
     "report": "vtech_path",
@@ -522,6 +538,7 @@ def load_gdo_customer_records() -> list[dict[str, str]]:
         "Shipping Information",
         "Note Scarico",
         "GDO",
+        "Tipo Cliente",
     ]
     with path.open("r", newline="", encoding="utf-8-sig") as file:
         reader = csv.DictReader(file)
@@ -1636,6 +1653,13 @@ class VTechWebHandler(BaseHTTPRequestHandler):
                 return
             self._send_json({"ok": True, "users": list_auth_users_payload(), "roles": USER_ROLES})
             return
+        if path == "/api/otd":
+            if not has_full_access(user):
+                self._forbidden()
+                return
+            init_otd_db()
+            self._send_json({"ok": True, **otd_payload()})
+            return
         if path == "/api/claims":
             if not has_claims_access(user):
                 self._forbidden()
@@ -1730,6 +1754,9 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/active-export":
                 self._handle_active_export(body, user)
                 return
+            if parsed.path == "/api/credit-notes-export":
+                self._handle_credit_notes_export(body, user)
+                return
             if parsed.path == "/api/fuel-settings":
                 self._handle_fuel_settings(body, user)
                 return
@@ -1744,6 +1771,9 @@ class VTechWebHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/claims":
                 self._handle_claims(body, user)
+                return
+            if parsed.path == "/api/otd":
+                self._handle_otd(body, user)
                 return
             if parsed.path == "/api/users":
                 self._handle_users(body, user)
@@ -1789,6 +1819,57 @@ class VTechWebHandler(BaseHTTPRequestHandler):
             raise ValueError("Azione claim non riconosciuta.")
 
         self._send_json({"ok": True, "claim": claim, **claims_payload()})
+
+    def _handle_otd(self, body: dict[str, Any], user: dict[str, str]) -> None:
+        init_otd_db()
+        action = clean_text(body.get("action")).lower()
+        author = clean_text(user.get("displayName") or user.get("username"))
+        result: dict[str, Any] = {}
+
+        if action == "import":
+            filename = safe_upload_filename(body.get("filename"), "otm_eventi.xlsx")
+            if Path(filename).suffix.lower() not in {".xlsx", ".xlsm"}:
+                raise ValueError("Per l'OTD serve il file Excel (.xlsx) del report OTM.")
+            result["importSummary"] = import_otm_events(decode_upload_base64(body.get("contentBase64")), filename)
+        elif action == "override":
+            result["updated"] = set_override(
+                body.get("orderIds") or [],
+                outcome=body.get("outcome"),
+                booked=body.get("booked"),
+                note=body.get("note"),
+                author=author,
+            )
+        elif action == "lead_time_set":
+            set_lead_time(body.get("carrier"), body.get("province"), body.get("days"))
+        elif action == "lead_time_delete":
+            delete_lead_time(int(body.get("id") or 0))
+        elif action == "lead_times_import":
+            filename = safe_upload_filename(body.get("filename"), "lead_time.xlsx")
+            if Path(filename).suffix.lower() not in {".xlsx", ".xlsm", ".csv"}:
+                raise ValueError("Formato non valido: usa .xlsx o .csv.")
+            result["importSummary"] = import_lead_times(decode_upload_base64(body.get("contentBase64")), filename)
+        elif action == "contract_import":
+            filename = safe_upload_filename(body.get("filename"), "rate_card.xlsx")
+            if Path(filename).suffix.lower() not in {".xlsx", ".xlsm"}:
+                raise ValueError("Per i lead time contrattuali serve la rate card Excel (.xlsx).")
+            result["importSummary"] = import_contract_lead_times(decode_upload_base64(body.get("contentBase64")))
+        elif action == "booked_add":
+            add_booked_destination(body.get("pattern"))
+        elif action == "booked_delete":
+            delete_booked_destination(int(body.get("id") or 0))
+        elif action == "export":
+            output_path = export_otd_report(
+                month=clean_text(body.get("month")),
+                carrier=clean_text(body.get("carrier")),
+            )
+            result.update({
+                "file": output_path.name,
+                "path": str(output_path),
+                "downloadUrl": download_url_for_path(output_path),
+            })
+        else:
+            raise ValueError("Azione OTD non riconosciuta.")
+        self._send_json({"ok": True, **result, **otd_payload()})
 
     def _handle_login(self, body: dict[str, Any]) -> None:
         username = clean_text(body.get("username"))
@@ -1878,6 +1959,17 @@ class VTechWebHandler(BaseHTTPRequestHandler):
         content = decode_upload_base64(body.get("contentBase64"))
         target.write_bytes(content)
 
+        if kind == "active":
+            # Valida PRIMA di sostituire la rate card in uso: un file con colonne
+            # sconosciute non deve azzerare silenziosamente l'attivo.
+            from tariff_engine import ActiveRateCard
+
+            try:
+                ActiveRateCard.from_excel(target)
+            except Exception:
+                target.unlink(missing_ok=True)
+                raise
+
         settings = load_settings()
         if kind in UPLOAD_SETTINGS_KEYS:
             settings[UPLOAD_SETTINGS_KEYS[kind]] = str(target)
@@ -1966,6 +2058,17 @@ class VTechWebHandler(BaseHTTPRequestHandler):
     def _handle_active_export(self, body: dict[str, Any], user: dict[str, str]) -> None:
         month = clean_text(body.get("month"))
         output_path = export_active_billing_report(month or None)
+        self._send_json({
+            "ok": True,
+            "file": output_path.name,
+            "path": str(output_path),
+            "downloadUrl": download_url_for_path(output_path),
+            "data": grouped_shipments(user),
+        })
+
+    def _handle_credit_notes_export(self, body: dict[str, Any], user: dict[str, str]) -> None:
+        month = clean_text(body.get("month"))
+        output_path = export_wholesaler_credit_notes(month or None)
         self._send_json({
             "ok": True,
             "file": output_path.name,

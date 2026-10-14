@@ -1505,6 +1505,8 @@ function renderBilling() {
   const trendTitle = months.length > 1 ? "Andamento mese per mese" : "Andamento del mese";
   const fuelSettings = state.data?.fuelSettings?.[state.billingMonth] || {};
   const activeFuel = fuelSettings.active ?? 0;
+  // Dal 01/10/2026 il fuel non si applica piu' all'attivo (resta solo sul passivo).
+  const activeFuelOff = state.billingMonth >= "2026-10";
   const passiveFuel = fuelSettings.passive ?? 2;
 
   els.content.innerHTML = `
@@ -1523,8 +1525,8 @@ function renderBilling() {
             </select>
           </label>
           <label class="billing-filter fuel-field">
-            <span>Fuel attivo %</span>
-            <input id="billingActiveFuel" inputmode="decimal" value="${escapeHtml(String(activeFuel).replace(".", ","))}" />
+            <span>${activeFuelOff ? "Fuel attivo % (non applicato)" : "Fuel attivo %"}</span>
+            <input id="billingActiveFuel" inputmode="decimal" value="${escapeHtml(String(activeFuel).replace(".", ","))}" ${activeFuelOff ? 'disabled title="Dal 01/10/2026 il fuel non si applica all\'attivo"' : ""} />
           </label>
           <label class="billing-filter fuel-field">
             <span>Fuel passivo %</span>
@@ -1533,6 +1535,7 @@ function renderBilling() {
           <button id="saveFuelBtn" type="button">Salva fuel</button>
           <button class="primary" id="exportActiveBtn" type="button">Scarica fatturazione attiva</button>
           <button class="primary" id="exportPassiveBtn" type="button">Scarica passivo vettori</button>
+          <button id="exportCreditNotesBtn" type="button" title="Note di credito da emettere per i mesi fino a settembre 2026">Note di credito</button>
         </div>
       </div>
 
@@ -3299,6 +3302,22 @@ els.content.addEventListener("click", async (event) => {
       });
       applyData(payload.data, { renderPage: true, keepSelection: false });
       showToast("Fuel mensile salvato. Tariffe e grafici ricalcolati.");
+    } catch (error) {
+      showToast(error.message);
+    }
+    return;
+  }
+  if (event.target.matches("#exportCreditNotesBtn")) {
+    try {
+      // Tutti i mesi gia' fatturati con la vecchia regola, non solo il mese selezionato.
+      const payload = await api("/api/credit-notes-export", {
+        method: "POST",
+        body: JSON.stringify({}),
+      });
+      showToast(`Excel note di credito creato in Download: ${payload.file}. Clicca qui per aprirlo.`, {
+        openPath: payload.path,
+        downloadUrl: payload.downloadUrl || "",
+      });
     } catch (error) {
       showToast(error.message);
     }
