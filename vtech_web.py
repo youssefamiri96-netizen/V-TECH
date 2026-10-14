@@ -43,7 +43,6 @@ from vtech_app import (
     STATUS_PLANNED,
     available_carriers,
     billing_reference_date,
-    ceil_pallets,
     clean_text,
     count_deleted_shipments,
     delete_shipments_permanently,
@@ -777,6 +776,26 @@ def mail_total_volume_m3(rows: list[dict[str, Any]]) -> float:
     return round(sum(to_float(row.get("Grand Total Shipment Ftp Vol m3")) or 0 for row in rows), 3)
 
 
+def mail_total_pallets(rows: list[dict[str, Any]]) -> float:
+    """Somma esatta dei pallet fatturati per spedizione (gia' arrotondati una
+    sola volta dal motore tariffario attivo), senza arrotondare di nuovo in
+    mail: per gli shipment multi-ordine e' gia' la somma sullo shipment intero,
+    non per singolo ordine."""
+    total = 0.0
+    for row in rows:
+        pallets = to_float(row.get("Pallet Fatturati"))
+        if pallets is None:
+            pallets = to_float(row.get("Theoretical Pallets")) or 0
+        total += pallets
+    return total
+
+
+def format_pallets_total(total_pallets: float) -> str:
+    if abs(total_pallets - round(total_pallets)) < 0.001:
+        return str(int(round(total_pallets)))
+    return format_number(total_pallets)
+
+
 def build_mail_weight_total_row(rows: list[dict[str, Any]], columns: list[str]) -> str:
     weight_column = "Grand Total Shipment Ftp Wgt Kg"
     volume_column = "Grand Total Shipment Ftp Vol m3"
@@ -804,7 +823,7 @@ def build_mail_weight_total_row(rows: list[dict[str, Any]], columns: list[str]) 
 
 def build_groupage_mail_html(rows: list[dict[str, Any]], mail_date: date, mail_token: str = "") -> str:
     columns = groupage_mail_columns()
-    total_pallets = sum(ceil_pallets(row.get("Theoretical Pallets")) for row in rows)
+    total_pallets = mail_total_pallets(rows)
     weight_total_row = build_mail_weight_total_row(rows, columns)
     header_cells = "".join(
         f"<th>{html_lib.escape(COLUMN_TITLES.get(column, column))}</th>"
@@ -837,7 +856,7 @@ def build_groupage_mail_html(rows: list[dict[str, Any]], mail_date: date, mail_t
     <p>Buongiorno,<br>
     di seguito il dettaglio delle spedizioni che caricherete con il ritiro n&deg;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; per il cliente Vtech:</p>
     <div class="summary">
-      <strong>Totale bancali da ritirare:</strong> {total_pallets}
+      <strong>Totale bancali da ritirare:</strong> {format_pallets_total(total_pallets)}
     </div>
     <table>
       <thead><tr>{header_cells}</tr></thead>
@@ -872,11 +891,11 @@ def build_table_plain_text(rows: list[dict[str, Any]], columns: list[str], inclu
 
 def build_groupage_mail_text(rows: list[dict[str, Any]], mail_date: date) -> str:
     columns = groupage_mail_columns()
-    total_pallets = sum(ceil_pallets(row.get("Theoretical Pallets")) for row in rows)
+    total_pallets = mail_total_pallets(rows)
     return "\n\n".join(
         [
             "Buongiorno,\ndi seguito il dettaglio delle spedizioni che caricherete con il ritiro n°     per il cliente Vtech:",
-            f"Totale bancali da ritirare: {total_pallets}",
+            f"Totale bancali da ritirare: {format_pallets_total(total_pallets)}",
             build_table_plain_text(rows, columns, include_weight_total=True),
         ]
     )
@@ -1301,7 +1320,7 @@ def create_groupage_mail(shipments: list[str]) -> dict[str, Any]:
     record_pending_groupage_mail(mail_token, rows, mail_date, subject)
     return {
         "rows": len(rows),
-        "pallets": sum(ceil_pallets(row.get("Theoretical Pallets")) for row in rows),
+        "pallets": mail_total_pallets(rows),
         "date": mail_date.strftime("%d/%m/%Y"),
         "pending": True,
         "mailMode": mail_result.get("mode", ""),
