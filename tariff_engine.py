@@ -152,6 +152,9 @@ DEFAULT_PASSIVE_FUEL_RATE = 0.02
 #   - nolo base: l'indice si applica solo sul 75% del nolo (il restante 25% e'
 #     la quota carburante, gestita a parte con il fuel surcharge);
 #   - extra:     l'indice si applica sul 100% dell'importo di ogni extra.
+# L'indice vale dalla competenza di luglio 2026, il mese in cui e' stato introdotto nel
+# programma (1 luglio 2026): maggio e giugno erano stati calcolati e fatturati senza indice.
+ACTIVE_ISTAT_START = date(2026, 7, 1)
 ACTIVE_ISTAT_INDEX_RATE = 0.0139
 ACTIVE_ISTAT_BASE_FRACTION = 0.75
 ACTIVE_ISTAT_BASE_FACTOR = 1 + ACTIVE_ISTAT_INDEX_RATE * ACTIVE_ISTAT_BASE_FRACTION  # 1.010425
@@ -1436,6 +1439,7 @@ class ActiveRateCard:
         shipment_row: dict[str, Any] | None = None,
         active_fuel_rate: float | None = None,
         split_ftl: bool = False,
+        apply_istat: bool = True,
     ) -> ActiveRateResult | None:
         province_code = clean_text(province).upper()
         row = self.rates_by_province.get(province_code)
@@ -1493,9 +1497,11 @@ class ActiveRateCard:
         )
 
         # Indicizzazione ISTAT: base sul 75%, extra sul 100%.
-        base_cost = round(raw_base_cost * ACTIVE_ISTAT_BASE_FACTOR, 2)
+        base_factor = ACTIVE_ISTAT_BASE_FACTOR if apply_istat else 1.0
+        extra_factor = ACTIVE_ISTAT_EXTRA_FACTOR if apply_istat else 1.0
+        base_cost = round(raw_base_cost * base_factor, 2)
         indexed_extra_amounts = [
-            (name, rate_label, round(amount * ACTIVE_ISTAT_EXTRA_FACTOR, 2))
+            (name, rate_label, round(amount * extra_factor, 2))
             for name, rate_label, amount in extra_amounts
         ]
         total_extra = round(sum(amount for _name, _rate_label, amount in indexed_extra_amounts), 2)
@@ -1504,6 +1510,8 @@ class ActiveRateCard:
         index_note = (
             f"indice ISTAT {ACTIVE_ISTAT_INDEX_RATE * 100:.2f}% "
             f"(nolo su {ACTIVE_ISTAT_BASE_FRACTION * 100:.0f}%, extra su 100%)"
+            if apply_istat
+            else f"senza indice ISTAT: competenza precedente a {ACTIVE_ISTAT_START.strftime('%m/%Y')}"
         )
         label = (
             f"Attiva {province_code}: {column}, {billed_pallets} pallet fatturati; "
@@ -2219,12 +2227,16 @@ def apply_tariffs_to_shipments(
     wholesaler_rule: Callable[[dict[str, Any]], bool] | None = None,
     pricing_rule: Callable[[dict[str, Any]], bool] | None = None,
     chain_names: bool = True,
+    istat_rule: Callable[[dict[str, Any]], bool] | None = None,
 ) -> None:
     """Calcola attivo/passivo di ogni spedizione.
 
     `wholesaler_rule(row)` stabilisce se per quella spedizione vale la distinzione
     GDO / grossista (True) o la vecchia regola in cui ogni cliente dell'anagrafica
     e' GDO (False). Senza funzione la distinzione vale sempre.
+
+    `istat_rule(row)` stabilisce se per quella spedizione vale l'indice ISTAT (competenza da
+    luglio 2026). Senza funzione l'indice vale sempre.
 
     `chain_names=False` limita il riconoscimento GDO ai soli clienti del file anagrafica (niente
     catene riconosciute dal nome): serve al ricalcolo delle note di credito sui mesi passati.
@@ -2256,6 +2268,8 @@ def apply_tariffs_to_shipments(
         effective_pricing_rule = pricing_rule if pricing_rule is not None else wholesaler_rule
         pricing_rule_on = effective_pricing_rule is None or effective_pricing_rule(row)
         row["Regola Tariffa"] = "SI" if pricing_rule_on else ""
+        istat_on = istat_rule is None or istat_rule(row)
+        row["Regola ISTAT"] = "SI" if istat_on else ""
         if pricing_rule_on:
             active_fuel_rate = None  # dal 01/10/2026 niente fuel sull'attivo
         if wholesaler_rule_on:
@@ -2303,6 +2317,7 @@ def apply_tariffs_to_shipments(
                 shipment_row=row,
                 active_fuel_rate=active_fuel_rate,
                 split_ftl=pricing_rule_on,
+                apply_istat=istat_on,
             )
             if active_card
             else None

@@ -50,6 +50,7 @@ from vtech_importer import (
     write_csv,
 )
 from tariff_engine import (
+    ACTIVE_ISTAT_START,
     WHOLESALER_RULE_START,
     has_freight_code,
     apply_contract_sla_to_shipments,
@@ -750,7 +751,15 @@ def wholesaler_rule_applies(row: dict[str, Any]) -> bool:
     return ref_date is None or ref_date >= WHOLESALER_RULE_START
 
 
+def istat_rule_applies(row: dict[str, Any]) -> bool:
+    """L'indice ISTAT vale dalla competenza di luglio 2026 (mese in cui e' stato introdotto):
+    i mesi precedenti sono stati calcolati e fatturati senza indice. Senza data vale l'indice."""
+    ref_date = billing_reference_date(row)
+    return ref_date is None or ref_date >= ACTIVE_ISTAT_START
+
+
 def apply_tariffs_to_shipments(shipment_rows: list[dict[str, Any]], **kwargs: Any) -> None:
+    kwargs.setdefault("istat_rule", istat_rule_applies)
     kwargs.setdefault("wholesaler_rule", wholesaler_rule_applies)
     kwargs.setdefault("pricing_rule", wholesaler_rule_applies)
     engine_apply_tariffs_to_shipments(shipment_rows, **kwargs)
@@ -3953,6 +3962,8 @@ def export_wholesaler_credit_notes(
     active_rates_path = resolve_active_rates_path()
     if active_rates_path is None:
         raise ValueError("Tariffe attive non disponibili: impossibile ricalcolare l'attivo.")
+    # L'indice ISTAT segue la competenza (da luglio 2026), come nel calcolo normale, cosi' fatturato
+    # e dovuto dei mesi di maggio e giugno restano senza indice.
     # Il fuel non fa parte del calcolo (fuel_settings_path=None): entra allo stesso modo in
     # fatturato e dovuto, quindi la differenza non cambia, ma gli importi sono quelli senza fuel.
     # "Fatturato": come era calcolato fino a settembre, compreso il vecchio doppio extra Amazon
@@ -3981,6 +3992,7 @@ def export_wholesaler_credit_notes(
         wholesaler_rule=lambda _row: True,
         pricing_rule=lambda _row: False,
         chain_names=False,
+        istat_rule=istat_rule_applies,
     )
 
     TYPE_GDO = "Storno grossista"
