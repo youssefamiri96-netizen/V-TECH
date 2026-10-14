@@ -3909,24 +3909,24 @@ def export_wholesaler_credit_notes(
     db_path: Path = DB_PATH,
     downloads_dir: Path = DOWNLOADS_DIR,
 ) -> Path:
-    """Note di credito da emettere per i mesi precedenti a WHOLESALER_RULE_START.
+    """Pareggio dei mesi precedenti a WHOLESALER_RULE_START in base al file clienti aggiornato
+    (distinzione GDO / grossista): note di credito da emettere e importi da addebitare.
 
-    Tutte le spedizioni con attivo dei mesi fino a settembre vengono ricalcolate con le
-    regole di oggi (grossisti riconosciuti anche con il nome scritto in modo diverso o
-    troncato dal report). Tre tipi di righe:
-    - "Storno grossista": spedizioni di un grossista fatturate con l'extra GDO +20% oppure
-      con la sponda (grossista non riconosciuto allora). Dovuto = senza extra GDO e senza
-      sponda (salvo nota SPONDA in anagrafica), con gli altri extra (preavviso BKL, fixed
-      time slot BKV, DKV, ETS). Credito = fatturato - dovuto (negativo = da addebitare).
-    - "Amazon extra doppio": Amazon con codici misti (BKL | BKV) fatturata con due volte il
-      +40%: si storna la differenza.
-    - "DKV non addebitata": clienti normali con ordine marcato DKV per cui l'extra DKV non e'
-      mai stato fatturato: si addebita il solo extra DKV.
-    Fuel e camion restano quelli dei mesi fatturati: la differenza dipende solo dalle regole
-    sopra. Un foglio con una riga per mese e uno con il dettaglio spedizione per spedizione.
-
-    Non entrano nell'export le spedizioni che oggi risultano GDO ma allora non erano state
-    fatturate come tali (catene fuori elenco): non sono una nota di credito."""
+    Tutte le spedizioni con attivo dei mesi fino a settembre vengono ricalcolate con le regole
+    di oggi, usando solo i clienti del file (grossisti e GDO riconosciuti anche con il nome
+    scritto in modo diverso o troncato dal report; le catene riconosciute dal solo nome non
+    entrano) e senza fuel. Tipi di riga:
+    - "Storno grossista": spedizione di un grossista fatturata con l'extra GDO +20% oppure con
+      la sponda (grossista non riconosciuto allora). Dovuto = senza extra GDO e senza sponda
+      (salvo nota SPONDA in anagrafica), con gli altri extra (preavviso BKL, fixed time slot BKV,
+      DKV, ETS). Credito = fatturato - dovuto (negativo = da addebitare).
+    - "GDO da addebitare": spedizione di una GDO del file fatturata come cliente normale (non
+      riconosciuta allora): dovuto = extra GDO +20% al posto di sponda, preavviso e simili.
+    - "Amazon extra doppio": Amazon con codici misti (BKL | BKV) fatturata con due volte il +40%.
+    - "DKV non addebitata": cliente normale con ordine marcato DKV senza l'extra DKV.
+    La nota di credito di ogni mese e' la somma di tutte le righe (negativa = da addebitare).
+    Il camion resta quello dei mesi fatturati. Un foglio con una riga per mese e uno con il
+    dettaglio spedizione per spedizione."""
     normalized_month = clean_text(month_key)
     if normalized_month and normalized_month >= WHOLESALER_RULE_START.strftime("%Y-%m"):
         raise ValueError(
@@ -3953,8 +3953,10 @@ def export_wholesaler_credit_notes(
     active_rates_path = resolve_active_rates_path()
     if active_rates_path is None:
         raise ValueError("Tariffe attive non disponibili: impossibile ricalcolare l'attivo.")
-    # "Fatturato": come era calcolato (e fatturato) fino a settembre, compreso il vecchio doppio
-    # extra Amazon (BKL | BKV = +80%) che oggi e' corretto a +40%.
+    # Il fuel non fa parte del calcolo (fuel_settings_path=None): entra allo stesso modo in
+    # fatturato e dovuto, quindi la differenza non cambia, ma gli importi sono quelli senza fuel.
+    # "Fatturato": come era calcolato fino a settembre, compreso il vecchio doppio extra Amazon
+    # (BKL | BKV = +80%) che oggi e' corretto a +40%.
     old_rows = [copy.deepcopy(row) for _ref_date, row in selected]
     for old_row in old_rows:
         old_row["Amazon Extra Cumulati"] = "SI"
@@ -3963,24 +3965,26 @@ def export_wholesaler_credit_notes(
         active_rates_path=active_rates_path,
         brt_extra_flags_path=BRT_EXTRA_FLAGS_PATH,
         gdo_customers_path=available_gdo_customers_path(),
-        fuel_settings_path=available_fuel_settings_path(),
+        fuel_settings_path=None,
     )
-    # "Dovuto": regole di oggi per clienti, DKV, sponda e Amazon; il prezzo resta quello dei mesi
-    # fatturati (fuel e camion come allora), cosi' la differenza dipende solo da queste regole.
+    # "Dovuto": regole di oggi per clienti del file, DKV, sponda e Amazon; il camion resta quello
+    # dei mesi fatturati, cosi' la differenza dipende solo da queste regole.
     corrected_rows = [copy.deepcopy(row) for _ref_date, row in selected]
     engine_apply_tariffs_to_shipments(
         corrected_rows,
         active_rates_path=active_rates_path,
         brt_extra_flags_path=BRT_EXTRA_FLAGS_PATH,
         gdo_customers_path=available_gdo_customers_path(),
-        fuel_settings_path=available_fuel_settings_path(),
+        fuel_settings_path=None,
         wholesaler_rule=lambda _row: True,
         pricing_rule=lambda _row: False,
+        chain_names=False,
     )
 
     TYPE_GDO = "Storno grossista"
     TYPE_DKV = "DKV non addebitata"
     TYPE_AMAZON = "Amazon extra doppio"
+    TYPE_GDO_DUE = "GDO da addebitare"
     records: list[dict[str, Any]] = []
     for (ref_date, _loaded_row), old_row, new_row in zip(selected, old_rows, corrected_rows):
         billed = round(to_float(old_row.get("Costo Attivo")) or 0, 2)
@@ -4013,6 +4017,20 @@ def export_wholesaler_credit_notes(
                 added=round(sum(max(new_extras.get(label, 0) - old_extras.get(label, 0), 0) for label in labels), 2),
                 credit=credit,
             )
+        elif new_is_gdo and not old_is_gdo:
+            # GDO del file che allora non era stata riconosciuta e veniva fatturata come cliente
+            # normale: dovuto = extra GDO al posto di sponda, preavviso e simili.
+            credit = round(billed - corrected, 2)
+            if abs(credit) < 0.005:
+                continue
+            labels = set(old_extras) | set(new_extras)
+            record.update(
+                kind=TYPE_GDO_DUE,
+                corrected=corrected,
+                removed=round(sum(max(old_extras.get(label, 0) - new_extras.get(label, 0), 0) for label in labels), 2),
+                added=round(sum(max(new_extras.get(label, 0) - old_extras.get(label, 0), 0) for label in labels), 2),
+                credit=credit,
+            )
         elif not old_is_gdo and not new_is_gdo:
             # Cliente normale con le regole di oggi come con quelle di allora: le uniche differenze
             # possibili sono la DKV mai addebitata (da addebitare) e il doppio extra Amazon (da stornare).
@@ -4028,9 +4046,7 @@ def export_wholesaler_credit_notes(
                 credit=credit,
             )
         else:
-            # Resta GDO con le regole di oggi, oppure e' una GDO riconosciuta solo ora (catena fuori
-            # elenco, allora fatturata come cliente normale): in nessuno dei due casi c'e' una nota
-            # di credito da emettere.
+            # GDO allora e oggi: nessuna differenza.
             continue
         records.append(record)
     if not records:
@@ -4065,6 +4081,11 @@ def export_wholesaler_credit_notes(
         month_columns.append((
             "Storno Amazon (extra doppio)",
             lambda items: round(sum(i["credit"] for i in items if i["kind"] == TYPE_AMAZON), 2),
+        ))
+    if TYPE_GDO_DUE in kinds_present:
+        month_columns.append((
+            "GDO da addebitare",
+            lambda items: round(-sum(i["credit"] for i in items if i["kind"] == TYPE_GDO_DUE), 2),
         ))
     if TYPE_DKV in kinds_present:
         month_columns.append((

@@ -507,6 +507,7 @@ def same_location(shipment_cap: str, shipment_city: str, entry: GdoRegistryEntry
 def match_customer(
     shipment_row: dict[str, Any],
     registry: GdoCustomerRegistry | None,
+    allow_chain_names: bool = True,
 ) -> GdoCustomerMatch | None:
     """Riconoscimento GDO / grossista valido dal 01/10/2026.
 
@@ -566,7 +567,7 @@ def match_customer(
             if by_address:
                 return best(by_address)
 
-    for name in names:
+    for name in names if allow_chain_names else ():
         if is_gdo_chain_name(name):
             return GdoCustomerMatch(
                 label=f"{clean_text(name)} (catena GDO riconosciuta dal nome)",
@@ -2198,12 +2199,16 @@ def apply_tariffs_to_shipments(
     fuel_settings_path: Path | None = None,
     wholesaler_rule: Callable[[dict[str, Any]], bool] | None = None,
     pricing_rule: Callable[[dict[str, Any]], bool] | None = None,
+    chain_names: bool = True,
 ) -> None:
     """Calcola attivo/passivo di ogni spedizione.
 
     `wholesaler_rule(row)` stabilisce se per quella spedizione vale la distinzione
     GDO / grossista (True) o la vecchia regola in cui ogni cliente dell'anagrafica
     e' GDO (False). Senza funzione la distinzione vale sempre.
+
+    `chain_names=False` limita il riconoscimento GDO ai soli clienti del file anagrafica (niente
+    catene riconosciute dal nome): serve al ricalcolo delle note di credito sui mesi passati.
 
     `pricing_rule(row)` stabilisce se per quella spedizione valgono le regole di prezzo dal
     01/10/2026 (niente fuel attivo, FTL spezzati oltre 33 pallet). Senza funzione segue
@@ -2237,12 +2242,12 @@ def apply_tariffs_to_shipments(
         if wholesaler_rule_on:
             # Dal 01/10/2026: riconoscimento per nome (anche scritto in modo diverso),
             # CAP e catena, vedi match_customer.
-            match_key = tuple(
+            match_key = (str(chain_names),) + tuple(
                 clean_text(row.get(column))
                 for column in ("Route to Customer", "Customer", "Cliente", "Route To Address", "Indirizzo Consegna", "Address")
             )
             if match_key not in customer_match_cache:
-                customer_match_cache[match_key] = match_customer(row, gdo_registry)
+                customer_match_cache[match_key] = match_customer(row, gdo_registry, allow_chain_names=chain_names)
             gdo_match = customer_match_cache[match_key]
         else:
             # Mesi gia' fatturati: stesso riconoscimento di prima (solo nome o indirizzo esatti).
