@@ -693,6 +693,12 @@ def build_shipment_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         total_volume = first_number(group, "Grand Total Shipment Ftp Vol m3")
         total_cs_weight = first_number(group, "Grand Total Shipment Ftp CS Wgt Kg")
         total_pallets = sum_numbers(group, "Theoretical Pallets")
+        order_count = len(unique_values(group, "Order"))
+        # Uno shipment con piu' ordini occupa fisicamente almeno un pallet per ordine: se il
+        # teorico peso/volume ne sviluppa meno (es. 2 ordini a 0,70 pallet), il totale non puo'
+        # scendere sotto il numero di ordini raggruppati.
+        if order_count > 1 and total_pallets < order_count:
+            total_pallets = float(order_count)
         wave = joined_unique(group, "Wave")
         wave_decision = apply_wave_decision(wave, carrier, service_level)
         tipo_servizio = wave_decision["tipo_servizio"]
