@@ -130,6 +130,69 @@ PROVINCE_TO_REGION = {
     "VV": "CALABRIA",
 }
 
+# --- Provincia ricavata dal CAP ---
+# Il report del magazzino a volte scrive nell'indirizzo un codice provincia inesistente (es.
+# 'VIA AURELIA 1334, ROMA AURELIA, MA, 00166, ITA' per un negozio di Roma): senza provincia il
+# tool non trova il listino e la spedizione resta senza pallet fatturati, prezzo e SLA. In quel
+# caso la provincia si ricava dal CAP. I prefissi a 2 cifre di CAP_PREFIX_PROVINCE appartengono a
+# una sola provincia; quelli condivisi fra due province hanno i tratti di CAP_PROVINCE_RANGES.
+# La Sardegna (07, 08, 09: province riorganizzate piu' volte) e i pochi CAP condivisi fra province
+# restano senza provincia: meglio nessun prezzo che un prezzo su una provincia sbagliata.
+# Tabelle controllate su tutti i CAP dell'elenco GeoNames (https://www.geonames.org, CC BY 4.0).
+CAP_PREFIX_PROVINCE = {
+    "00": "RM", "01": "VT", "02": "RI", "03": "FR", "04": "LT", "05": "TR", "06": "PG",
+    "10": "TO", "11": "AO", "12": "CN", "14": "AT", "15": "AL", "16": "GE", "17": "SV",
+    "18": "IM", "19": "SP", "21": "VA", "22": "CO", "24": "BG", "25": "BS", "27": "PV",
+    "29": "PC", "30": "VE", "31": "TV", "32": "BL", "35": "PD", "36": "VI", "37": "VR",
+    "38": "TN", "39": "BZ", "40": "BO", "41": "MO", "42": "RE", "43": "PR", "44": "FE",
+    "45": "RO", "46": "MN", "48": "RA", "50": "FI", "51": "PT", "52": "AR", "53": "SI",
+    "54": "MS", "55": "LU", "56": "PI", "57": "LI", "58": "GR", "59": "PO", "60": "AN",
+    "61": "PU", "62": "MC", "64": "TE", "65": "PE", "66": "CH", "67": "AQ", "70": "BA",
+    "71": "FG", "72": "BR", "73": "LE", "74": "TA", "75": "MT", "76": "BT", "80": "NA",
+    "81": "CE", "82": "BN", "83": "AV", "84": "SA", "85": "PZ", "87": "CS", "90": "PA",
+    "91": "TP", "92": "AG", "93": "CL", "94": "EN", "95": "CT", "96": "SR", "97": "RG",
+    "98": "ME",
+}
+CAP_PROVINCE_RANGES: tuple[tuple[int, int, str], ...] = (
+    (13000, 13799, "VC"), (13800, 13999, "BI"),
+    (20000, 20810, "MI"), (20811, 20999, "MB"),
+    (23000, 23799, "SO"), (23800, 23999, "LC"),
+    (26000, 26799, "CR"), (26800, 26999, "LO"),
+    (28000, 28799, "NO"), (28800, 28999, "VB"),
+    (33000, 33069, "UD"), (33070, 33099, "PN"), (33100, 33169, "UD"), (33170, 33199, "PN"),
+    (34000, 34069, "TS"), (34070, 34099, "GO"), (34100, 34169, "TS"), (34170, 34199, "GO"),
+    (47000, 47799, "FC"), (47800, 47889, "RN"), (47900, 47999, "RN"),  # 478xx-479xx: San Marino escluso
+    (63000, 63799, "AP"), (63800, 63999, "FM"),
+    (86000, 86069, "CB"), (86070, 86099, "IS"), (86100, 86169, "CB"), (86170, 86199, "IS"),
+    (88000, 88799, "CZ"), (88800, 88999, "KR"),
+    (89000, 89799, "RC"), (89800, 89999, "VV"),
+)
+CAP_SHARED_BETWEEN_PROVINCES = {"12071", "18025"}
+
+
+def province_from_cap(cap: Any) -> str:
+    """Provincia di un CAP di 5 cifre; vuoto se il CAP non e' valido o non identifica una provincia."""
+    digits = re.sub(r"\s+", "", str(cap if cap is not None else ""))
+    if not re.fullmatch(r"\d{5}", digits) or digits in CAP_SHARED_BETWEEN_PROVINCES:
+        return ""
+    value = int(digits)
+    for low, high, province in CAP_PROVINCE_RANGES:
+        if low <= value <= high:
+            return province
+    return CAP_PREFIX_PROVINCE.get(digits[:2], "")
+
+
+def infer_province_from_address(address: Any) -> str:
+    """Provincia dal CAP dell'indirizzo: si prende l'ultimo gruppo di 5 cifre, perche' il CAP
+    viene dopo via, citta' e provincia ('..., ROMA AURELIA, MA, 00166, ITA')."""
+    text = str(address if address is not None else "")
+    for cap in reversed(re.findall(r"(?<!\d)\d{5}(?!\d)", text)):
+        province = province_from_cap(cap)
+        if province:
+            return province
+    return ""
+
+
 BRT_REGIONS = set(PROVINCE_TO_REGION.values())
 BRT_VOLUMETRIC_KG_PER_M3 = 250.0
 BANCALI_EPAL_WEIGHT_KG = 25.0
@@ -2274,6 +2337,13 @@ def apply_tariffs_to_shipments(
         row["Regola ISTAT"] = "SI" if istat_on else ""
         if pricing_rule_on:
             active_fuel_rate = None  # dal 01/10/2026 niente fuel sull'attivo
+            if not province:
+                # Dal 01/10/2026: provincia mancante o con un codice inesistente nel report
+                # (es. 'MA' per Roma) ricavata dal CAP; i mesi gia' fatturati non cambiano.
+                province = infer_province_from_address(row.get("Route To Address"))
+                if province:
+                    row["Provincia"] = province
+                    row["Provincia Dedotta"] = "SI"
         if wholesaler_rule_on:
             # Dal 01/10/2026: riconoscimento per nome (anche scritto in modo diverso),
             # CAP e catena, vedi match_customer.
@@ -2330,6 +2400,8 @@ def apply_tariffs_to_shipments(
             row["Extra Attivi Totale"] = round(active_result.extra_cost, 2)
             row["Extra Attivi Applicati"] = " | ".join(active_result.extras or [])
             row["Tariffa Attiva Applicata"] = active_result.tariff_label
+            if clean_text(row.get("Provincia Dedotta")).upper() == "SI":
+                row["Tariffa Attiva Applicata"] += f" [provincia {province} ricavata dal CAP dell'indirizzo]"
 
         for column in [
             "Costo Passivo",
