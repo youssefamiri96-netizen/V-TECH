@@ -215,9 +215,11 @@ DEFAULT_PASSIVE_FUEL_RATE = 0.02
 #   - nolo base: l'indice si applica solo sul 75% del nolo (il restante 25% e'
 #     la quota carburante, gestita a parte con il fuel surcharge);
 #   - extra:     l'indice si applica sul 100% dell'importo di ogni extra.
-# L'indice vale dalla competenza di luglio 2026, il mese in cui e' stato introdotto nel
-# programma (1 luglio 2026): maggio e giugno erano stati calcolati e fatturati senza indice.
-ACTIVE_ISTAT_START = date(2026, 7, 1)
+# L'indice vale dalla competenza di giugno 2026: e' stato introdotto nel programma il 1 luglio
+# 2026 e la fattura di giugno, emessa dopo, lo contiene gia' (il cliente lo conferma: i suoi
+# conti di giugno tornano al centesimo solo con l'indice). Maggio era stato fatturato prima,
+# senza indice.
+ACTIVE_ISTAT_START = date(2026, 6, 1)
 ACTIVE_ISTAT_INDEX_RATE = 0.0139
 ACTIVE_ISTAT_BASE_FRACTION = 0.75
 ACTIVE_ISTAT_BASE_FACTOR = 1 + ACTIVE_ISTAT_INDEX_RATE * ACTIVE_ISTAT_BASE_FRACTION  # 1.010425
@@ -1061,17 +1063,6 @@ def has_freight_code(row: dict[str, Any] | None, code: str) -> bool:
     return False
 
 
-def count_deliveries(row: dict[str, Any] | None) -> int:
-    """Consegne (delivery) di uno shipment: un ordine = una consegna, come nel resto del programma
-    (XML di consegna, export per ordine). Lo shipment senza ordini conta una consegna."""
-    orders: set[str] = set()
-    for part in re.split(r"\s*\|\s*|[,;\r\n]+", clean_text((row or {}).get("Orders"))):
-        order = clean_text(part)
-        if order:
-            orders.add(order)
-    return max(1, len(orders))
-
-
 def is_dkv_shipment(row: dict[str, Any] | None) -> bool:
     """DKV (data di consegna tassativa) dal solo Freight Code o dal freight impostato a mano:
     niente ricerca nei testi liberi (note, wave), dove 'NO DKV' non deve scatenare l'extra."""
@@ -1330,15 +1321,10 @@ def active_extra_charges(
         add_fixed("Sponda idraulica groupage", settings.tail_lift_groupage)
 
     if has_freight_code(shipment_row, "BKL") and not is_gdo and not is_amazon:
-        # Preavviso telefonico: 5 EUR per consegna (contratto: "5 EUR/delivery"), non per shipment.
-        # L'interruttore "Preavviso Per Spedizione" riproduce il vecchio calcolo (una volta per
-        # shipment) e serve solo all'export delle note di credito per ricostruire il fatturato.
-        legacy_per_shipment = clean_text((shipment_row or {}).get("Preavviso Per Spedizione")).upper() in TRUE_VALUES
-        deliveries = 1 if legacy_per_shipment else count_deliveries(shipment_row)
-        add_fixed(
-            "Phone preadvise BKL" if deliveries == 1 else f"Phone preadvise BKL ({deliveries} delivery)",
-            settings.phone_preadvise * deliveries,
-        )
+        # Preavviso telefonico: 5 EUR per spedizione, cioe' una sola chiamata per fermata anche se lo
+        # shipment ha piu' ordini/DDT (il "5 EUR/delivery" del contratto e' la consegna alla fermata,
+        # non il singolo ordine).
+        add_fixed("Phone preadvise BKL", settings.phone_preadvise)
 
     if is_active_urgent(shipment_row):
         add_fixed("Urgent delivery", settings.urgent_per_pallet * max(1, billed_pallets))
@@ -2301,7 +2287,7 @@ def apply_tariffs_to_shipments(
     e' GDO (False). Senza funzione la distinzione vale sempre.
 
     `istat_rule(row)` stabilisce se per quella spedizione vale l'indice ISTAT (competenza da
-    luglio 2026). Senza funzione l'indice vale sempre.
+    giugno 2026). Senza funzione l'indice vale sempre.
 
     `chain_names=False` limita il riconoscimento GDO ai soli clienti del file anagrafica (niente
     catene riconosciute dal nome): serve al ricalcolo delle note di credito sui mesi passati.

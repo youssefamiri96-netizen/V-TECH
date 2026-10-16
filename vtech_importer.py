@@ -809,7 +809,7 @@ def wholesaler_rule_applies(row: dict[str, Any]) -> bool:
 
 
 def istat_rule_applies(row: dict[str, Any]) -> bool:
-    """Indice ISTAT dalla competenza di luglio 2026 (data di partenza, altrimenti Late Ship Date)."""
+    """Indice ISTAT dalla competenza di giugno 2026 (data di partenza, altrimenti Late Ship Date)."""
     for column in ("Dispatch Date", "Late Ship Date"):
         parsed = parse_datetime_value(row.get(column))
         if parsed is not None:

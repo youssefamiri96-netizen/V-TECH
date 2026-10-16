@@ -52,7 +52,9 @@ from vtech_importer import (
 from tariff_engine import (
     ACTIVE_ISTAT_START,
     WHOLESALER_RULE_START,
+    ActiveRateCard,
     has_freight_code,
+    infer_province_from_address,
     apply_contract_sla_to_shipments,
     apply_tariffs_to_shipments as engine_apply_tariffs_to_shipments,
     default_carrier_tariffs_path,
@@ -752,8 +754,9 @@ def wholesaler_rule_applies(row: dict[str, Any]) -> bool:
 
 
 def istat_rule_applies(row: dict[str, Any]) -> bool:
-    """L'indice ISTAT vale dalla competenza di luglio 2026 (mese in cui e' stato introdotto):
-    i mesi precedenti sono stati calcolati e fatturati senza indice. Senza data vale l'indice."""
+    """L'indice ISTAT vale dalla competenza di giugno 2026 (la fattura di giugno, emessa dopo
+    l'introduzione dell'indice, lo contiene): maggio e' stato fatturato senza indice. Senza data
+    vale l'indice."""
     ref_date = billing_reference_date(row)
     return ref_date is None or ref_date >= ACTIVE_ISTAT_START
 
@@ -3934,8 +3937,9 @@ def export_wholesaler_credit_notes(
     - "Amazon extra doppio": Amazon con codici misti (BKL | BKV) fatturata con due volte il +40%.
     - "DKV non addebitata": cliente normale con ordine marcato DKV senza l'extra DKV.
     La nota di credito di ogni mese e' la somma di tutte le righe (negativa = da addebitare).
-    Il camion resta quello dei mesi fatturati. Un foglio con una riga per mese e uno con il
-    dettaglio spedizione per spedizione."""
+    Il camion resta quello dei mesi fatturati. Fogli: una riga per mese, il dettaglio spedizione
+    per spedizione, il dettaglio per DDT (come le righe di fattura) e, se ce ne sono, le spedizioni
+    dei grossisti non incluse con il motivo (senza prezzo attivo, nessuna differenza)."""
     normalized_month = clean_text(month_key)
     if normalized_month and normalized_month >= WHOLESALER_RULE_START.strftime("%Y-%m"):
         raise ValueError(
@@ -3944,6 +3948,7 @@ def export_wholesaler_credit_notes(
         )
     rows = load_shipments_from_db(db_path)
     selected: list[tuple[date, dict[str, Any]]] = []
+    unpriced: list[tuple[date, dict[str, Any]]] = []
     for row in rows:
         ref_date = billing_reference_date(row)
         if ref_date is None or ref_date >= WHOLESALER_RULE_START:
@@ -3952,6 +3957,7 @@ def export_wholesaler_credit_notes(
             continue
         billed = to_float(row.get("Costo Attivo"))
         if billed is None or billed <= 0:
+            unpriced.append((ref_date, row))
             continue
         selected.append((ref_date, row))
 
@@ -3962,17 +3968,15 @@ def export_wholesaler_credit_notes(
     active_rates_path = resolve_active_rates_path()
     if active_rates_path is None:
         raise ValueError("Tariffe attive non disponibili: impossibile ricalcolare l'attivo.")
-    # L'indice ISTAT segue la competenza (da luglio 2026), come nel calcolo normale, cosi' fatturato
-    # e dovuto dei mesi di maggio e giugno restano senza indice.
+    # L'indice ISTAT segue la competenza (da giugno 2026), come nel calcolo normale, cosi' fatturato
+    # e dovuto di maggio restano senza indice e quelli di giugno con l'indice, come in fattura.
     # Il fuel non fa parte del calcolo (fuel_settings_path=None): entra allo stesso modo in
     # fatturato e dovuto, quindi la differenza non cambia, ma gli importi sono quelli senza fuel.
     # "Fatturato": come era calcolato fino a settembre, compreso il vecchio doppio extra Amazon
-    # (BKL | BKV = +80%) che oggi e' corretto a +40% e il preavviso telefonico addebitato una volta
-    # per shipment anziche' per consegna.
+    # (BKL | BKV = +80%) che oggi e' corretto a +40%.
     old_rows = [copy.deepcopy(row) for _ref_date, row in selected]
     for old_row in old_rows:
         old_row["Amazon Extra Cumulati"] = "SI"
-        old_row["Preavviso Per Spedizione"] = "SI"
     apply_tariffs_to_shipments(
         old_rows,
         active_rates_path=active_rates_path,
@@ -3982,24 +3986,52 @@ def export_wholesaler_credit_notes(
     )
     # "Dovuto": regole di oggi per clienti del file, DKV, sponda e Amazon; il camion resta quello
     # dei mesi fatturati, cosi' la differenza dipende solo da queste regole.
+    def apply_today_rules(target_rows: list[dict[str, Any]]) -> None:
+        engine_apply_tariffs_to_shipments(
+            target_rows,
+            active_rates_path=active_rates_path,
+            brt_extra_flags_path=BRT_EXTRA_FLAGS_PATH,
+            gdo_customers_path=available_gdo_customers_path(),
+            fuel_settings_path=None,
+            wholesaler_rule=lambda _row: True,
+            pricing_rule=lambda _row: False,
+            chain_names=False,
+            istat_rule=istat_rule_applies,
+        )
+
     corrected_rows = [copy.deepcopy(row) for _ref_date, row in selected]
-    engine_apply_tariffs_to_shipments(
-        corrected_rows,
-        active_rates_path=active_rates_path,
-        brt_extra_flags_path=BRT_EXTRA_FLAGS_PATH,
-        gdo_customers_path=available_gdo_customers_path(),
-        fuel_settings_path=None,
-        wholesaler_rule=lambda _row: True,
-        pricing_rule=lambda _row: False,
-        chain_names=False,
-        istat_rule=istat_rule_applies,
-    )
+    apply_today_rules(corrected_rows)
+
+    # Spedizioni di grossisti che non entrano nella nota di credito, con il motivo: senza prezzo attivo
+    # (provincia mancante o senza tariffa, pallet non validi: non erano calcolabili in fattura) oppure
+    # senza differenza (es. BKV). Servono a spiegare al cliente perche' un DDT non compare.
+    excluded: list[dict[str, Any]] = []
+    if unpriced:
+        unpriced_rows = [copy.deepcopy(row) for _ref_date, row in unpriced]
+        apply_today_rules(unpriced_rows)
+        known_provinces = set(ActiveRateCard.from_excel(active_rates_path).rates_by_province)
+        for (ref_date, _loaded_row), checked in zip(unpriced, unpriced_rows):
+            if clean_text(checked.get("Cliente Grossista")).upper() not in {"SI", "S", "TRUE", "1"}:
+                continue
+            province = clean_text(checked.get("Provincia")).upper()
+            pallets = to_float(checked.get("Theoretical Pallets"))
+            if not province:
+                suggestion = infer_province_from_address(checked.get("Route To Address"))
+                reason = "Senza prezzo attivo: provincia mancante o non valida nell'indirizzo del report" + (
+                    f" (dal CAP risulterebbe {suggestion})" if suggestion else ""
+                )
+            elif province not in known_provinces:
+                reason = f"Senza prezzo attivo: la provincia {province} non ha tariffa nel listino"
+            elif pallets is None or pallets <= 0:
+                reason = "Senza prezzo attivo: pallet non validi"
+            else:
+                reason = "Senza prezzo attivo"
+            excluded.append({"ref_date": ref_date, "row": checked, "billed": "", "reason": reason})
 
     TYPE_GDO = "Storno grossista"
     TYPE_DKV = "DKV non addebitata"
     TYPE_AMAZON = "Amazon extra doppio"
     TYPE_GDO_DUE = "GDO da addebitare"
-    TYPE_PREADVISE = "Preavviso per delivery"
     TYPE_OTHER = "Altre differenze"
     records: list[dict[str, Any]] = []
     for (ref_date, _loaded_row), old_row, new_row in zip(selected, old_rows, corrected_rows):
@@ -4024,7 +4056,15 @@ def export_wholesaler_credit_notes(
         if new_is_wholesaler or (old_is_gdo and not new_is_gdo):
             credit = round(billed - corrected, 2)
             if abs(credit) < 0.005:
-                continue  # nessuna differenza (es. BKV: il +20% GDO e' sostituito dal +20% fixed time slot)
+                # nessuna differenza (es. BKV: il +20% GDO e' sostituito dal +20% fixed time slot)
+                if new_is_wholesaler:
+                    excluded.append({
+                        "ref_date": ref_date,
+                        "row": old_row,
+                        "billed": billed,
+                        "reason": "Nessuna differenza: extra fatturati e dovuti coincidono (es. BKV: il +20% GDO e' sostituito dal +20% fixed time slot)",
+                    })
+                continue
             labels = set(old_extras) | set(new_extras)
             record.update(
                 kind=TYPE_GDO,
@@ -4051,15 +4091,13 @@ def export_wholesaler_credit_notes(
             )
         elif not old_is_gdo and not new_is_gdo:
             # Cliente normale: con le regole di oggi come con quelle di allora le uniche differenze
-            # possibili sono il doppio extra Amazon (da stornare), la DKV mai addebitata e il
-            # preavviso telefonico per consegna (prima una volta per shipment): da addebitare.
+            # possibili sono il doppio extra Amazon (da stornare) e la DKV mai addebitata (da addebitare).
             credit = round(billed - corrected, 2)
             if abs(credit) < 0.005:
                 continue
             components = {
                 TYPE_AMAZON: round(old_extras.get("Amazon booking", 0) - new_extras.get("Amazon booking", 0), 2),
                 TYPE_DKV: round(old_extras.get("DKV data tassativa", 0) - new_extras.get("DKV data tassativa", 0), 2),
-                TYPE_PREADVISE: round(old_extras.get("Preavviso", 0) - new_extras.get("Preavviso", 0), 2),
             }
             residual = round(credit - sum(components.values()), 2)
             if abs(residual) >= 0.005:
@@ -4113,7 +4151,6 @@ def export_wholesaler_credit_notes(
         (TYPE_GDO_DUE, "GDO da addebitare", -1),
         (TYPE_AMAZON, "Storno Amazon (extra doppio)", 1),
         (TYPE_DKV, "DKV da addebitare", -1),
-        (TYPE_PREADVISE, "Preavviso per delivery da addebitare", -1),
         (TYPE_OTHER, "Altre differenze", 1),
     ):
         if name in components_present:
@@ -4203,6 +4240,114 @@ def export_wholesaler_credit_notes(
         for cell in column_cells:
             cell.number_format = "0"
     add_table(detail_sheet, "NoteCreditoDettaglio", "TableStyleMedium4", False)
+
+    # Dettaglio per DDT: come nel file della fatturazione attiva, gli importi dello shipment (GDO,
+    # preavviso fatturato e dovuto) si dividono fra i DDT dello shipment. Serve a confrontare riga
+    # per riga con le fatture.
+    ddt_sheet = workbook.create_sheet("Per DDT")
+    ddt_headers = [
+        "Mese",
+        "Data rif.",
+        "Shipment",
+        "DDT",
+        "Cliente",
+        "Indirizzo",
+        "Provincia",
+        "Tipo",
+        "Extra GDO stornato",
+        "Preavviso gia' fatturato",
+        "Preavviso dovuto",
+        "Altre differenze",
+        "Nota di credito (negativo = da addebitare)",
+    ]
+    ddt_sheet.append(ddt_headers)
+    for record in records:
+        row = record["row"]
+        orders = billing_order_numbers(row) or [clean_text(row.get("Orders"))]
+        order_count = max(1, len(orders))
+        old_amounts = parse_billing_extra_amounts(record["old_extras"])
+        new_amounts = parse_billing_extra_amounts(record["new_extras"])
+        gdo_total = round(old_amounts.get("Consegna GDO", 0) - new_amounts.get("Consegna GDO", 0), 2)
+        phone_billed = old_amounts.get("Preavviso", 0)
+        phone_due = new_amounts.get("Preavviso", 0)
+        other_total = round(record["credit"] - gdo_total - (phone_billed - phone_due), 2)
+        for order_index, order_number in enumerate(orders):
+            gdo_line = split_billing_value(gdo_total, order_index, order_count)
+            billed_line = split_billing_value(phone_billed, order_index, order_count)
+            due_line = split_billing_value(phone_due, order_index, order_count)
+            other_line = split_billing_value(other_total, order_index, order_count)
+            ddt_sheet.append([
+                record["month"],
+                record["ref_date"],
+                clean_text(row.get("Shipment")),
+                order_number,
+                clean_text(row.get("Route to Customer")),
+                clean_text(row.get("Route To Address")),
+                clean_text(row.get("Provincia")),
+                record["kind"],
+                gdo_line,
+                billed_line,
+                due_line,
+                other_line,
+                round(gdo_line + billed_line - due_line + other_line, 2),
+            ])
+    ddt_total_row = ddt_sheet.max_row + 1
+    ddt_totals = [""] * len(ddt_headers)
+    ddt_totals[0] = "Totale"
+    for column in range(9, 14):
+        ddt_totals[column - 1] = sum_formula(column, ddt_total_row)
+    ddt_sheet.append(ddt_totals)
+    style_total_row(ddt_sheet, ddt_total_row, "ECFDF5")
+    for cell in ddt_sheet["B"][1:]:
+        if isinstance(cell.value, date):
+            cell.number_format = "dd/mm/yyyy"
+    _style_passive_sheet(ddt_sheet, money_columns=[9, 10, 11, 12, 13], numeric_columns=[])
+    add_table(ddt_sheet, "NoteCreditoPerDDT", "TableStyleMedium4", False)
+
+    if excluded:
+        excluded.sort(key=lambda item: (
+            item["ref_date"],
+            clean_text(item["row"].get("Route to Customer")),
+            clean_text(item["row"].get("Shipment")),
+        ))
+        skipped_sheet = workbook.create_sheet("Non inclusi")
+        skipped_headers = [
+            "Mese",
+            "Data rif.",
+            "Shipment",
+            "Ordini",
+            "Cliente",
+            "Indirizzo",
+            "Provincia",
+            "Servizio",
+            "Freight",
+            "Pallet",
+            "Importo attivo",
+            "Motivo",
+        ]
+        skipped_sheet.append(skipped_headers)
+        for item in excluded:
+            row = item["row"]
+            ref_date = item["ref_date"]
+            skipped_sheet.append([
+                f"{ref_date.year:04d}-{ref_date.month:02d}",
+                ref_date,
+                clean_text(row.get("Shipment")),
+                clean_text(row.get("Orders")),
+                clean_text(row.get("Route to Customer")),
+                clean_text(row.get("Route To Address")),
+                clean_text(row.get("Provincia")),
+                clean_text(row.get("Service Level")),
+                clean_text(row.get("Freight Code")),
+                to_float(row.get("Theoretical Pallets")) or "",
+                item["billed"],
+                item["reason"],
+            ])
+        for cell in skipped_sheet["B"][1:]:
+            if isinstance(cell.value, date):
+                cell.number_format = "dd/mm/yyyy"
+        _style_passive_sheet(skipped_sheet, money_columns=[11], numeric_columns=[10])
+        add_table(skipped_sheet, "NoteCreditoNonInclusi", "TableStyleMedium4", False)
 
     downloads_dir.mkdir(parents=True, exist_ok=True)
     suffix = normalized_month if normalized_month else "tutti_i_mesi"
