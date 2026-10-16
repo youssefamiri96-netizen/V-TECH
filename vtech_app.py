@@ -3973,12 +3973,10 @@ def export_wholesaler_credit_notes(
     # Il fuel non fa parte del calcolo (fuel_settings_path=None): entra allo stesso modo in
     # fatturato e dovuto, quindi la differenza non cambia, ma gli importi sono quelli senza fuel.
     # "Fatturato": come era calcolato fino a settembre, compreso il vecchio doppio extra Amazon
-    # (BKL | BKV = +80%) che oggi e' corretto a +40% e il preavviso telefonico addebitato una volta
-    # per shipment anziche' per consegna.
+    # (BKL | BKV = +80%) che oggi e' corretto a +40%.
     old_rows = [copy.deepcopy(row) for _ref_date, row in selected]
     for old_row in old_rows:
         old_row["Amazon Extra Cumulati"] = "SI"
-        old_row["Preavviso Per Spedizione"] = "SI"
     apply_tariffs_to_shipments(
         old_rows,
         active_rates_path=active_rates_path,
@@ -4034,7 +4032,6 @@ def export_wholesaler_credit_notes(
     TYPE_DKV = "DKV non addebitata"
     TYPE_AMAZON = "Amazon extra doppio"
     TYPE_GDO_DUE = "GDO da addebitare"
-    TYPE_PREADVISE = "Preavviso per delivery"
     TYPE_OTHER = "Altre differenze"
     records: list[dict[str, Any]] = []
     for (ref_date, _loaded_row), old_row, new_row in zip(selected, old_rows, corrected_rows):
@@ -4094,15 +4091,13 @@ def export_wholesaler_credit_notes(
             )
         elif not old_is_gdo and not new_is_gdo:
             # Cliente normale: con le regole di oggi come con quelle di allora le uniche differenze
-            # possibili sono il doppio extra Amazon (da stornare), la DKV mai addebitata e il
-            # preavviso telefonico per consegna (prima una volta per shipment): da addebitare.
+            # possibili sono il doppio extra Amazon (da stornare) e la DKV mai addebitata (da addebitare).
             credit = round(billed - corrected, 2)
             if abs(credit) < 0.005:
                 continue
             components = {
                 TYPE_AMAZON: round(old_extras.get("Amazon booking", 0) - new_extras.get("Amazon booking", 0), 2),
                 TYPE_DKV: round(old_extras.get("DKV data tassativa", 0) - new_extras.get("DKV data tassativa", 0), 2),
-                TYPE_PREADVISE: round(old_extras.get("Preavviso", 0) - new_extras.get("Preavviso", 0), 2),
             }
             residual = round(credit - sum(components.values()), 2)
             if abs(residual) >= 0.005:
@@ -4156,7 +4151,6 @@ def export_wholesaler_credit_notes(
         (TYPE_GDO_DUE, "GDO da addebitare", -1),
         (TYPE_AMAZON, "Storno Amazon (extra doppio)", 1),
         (TYPE_DKV, "DKV da addebitare", -1),
-        (TYPE_PREADVISE, "Preavviso per delivery da addebitare", -1),
         (TYPE_OTHER, "Altre differenze", 1),
     ):
         if name in components_present:
@@ -4247,9 +4241,9 @@ def export_wholesaler_credit_notes(
             cell.number_format = "0"
     add_table(detail_sheet, "NoteCreditoDettaglio", "TableStyleMedium4", False)
 
-    # Dettaglio per DDT: come nel file della fatturazione attiva, GDO e preavviso fatturati sullo
-    # shipment si dividono fra i DDT dello shipment, mentre il preavviso dovuto e' di 5 EUR (piu'
-    # l'indice dove vale) per ogni DDT. Serve a confrontare riga per riga con le fatture.
+    # Dettaglio per DDT: come nel file della fatturazione attiva, gli importi dello shipment (GDO,
+    # preavviso fatturato e dovuto) si dividono fra i DDT dello shipment. Serve a confrontare riga
+    # per riga con le fatture.
     ddt_sheet = workbook.create_sheet("Per DDT")
     ddt_headers = [
         "Mese",
