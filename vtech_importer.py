@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import re
 from collections import defaultdict
 from datetime import date, datetime
@@ -693,6 +694,20 @@ def build_shipment_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         total_volume = first_number(group, "Grand Total Shipment Ftp Vol m3")
         total_cs_weight = first_number(group, "Grand Total Shipment Ftp CS Wgt Kg")
         total_pallets = sum_numbers(group, "Theoretical Pallets")
+        order_count = len(unique_values(group, "Order"))
+        # Ogni ordine della spedizione occupa fisicamente il suo pallet: per gli shipment
+        # multi-ordine il teorico si arrotonda per eccesso ORDINE PER ORDINE (minimo 1 ciascuno)
+        # e poi si somma, non sul totale della spedizione (es. 3 ordini a 2,33 / 1,7 / 1,2
+        # pallet -> 3 + 2 + 2 = 7, non ceil(2,33+1,7+1,2) = 6).
+        if order_count > 1:
+            pallets_by_order: dict[str, float] = {}
+            for item_row in group:
+                order_key = clean_text(item_row.get("Order"))
+                if not order_key:
+                    continue
+                value = to_float(item_row.get("Theoretical Pallets")) or 0.0
+                pallets_by_order[order_key] = pallets_by_order.get(order_key, 0.0) + value
+            total_pallets = float(sum(max(1, math.ceil(value - 1e-9)) for value in pallets_by_order.values()))
         wave = joined_unique(group, "Wave")
         wave_decision = apply_wave_decision(wave, carrier, service_level)
         tipo_servizio = wave_decision["tipo_servizio"]

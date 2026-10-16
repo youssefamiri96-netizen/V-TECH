@@ -248,12 +248,12 @@ BRT_EXTRA_FLAG_COLUMNS = [
     "Giacenza Dossier",
     "Riconsegna Giacenza",
     # Colonne usate solo per gli extra passivi Macsped (vedi MacspedPassiveRateCard.calculate):
-    # Sponda Idraulica NON e' qui: e' automatica, stessa regola della sponda attiva BRT groupage.
+    # Sponda Idraulica e Preavviso Telefonico NON sono qui: sono automatiche, stessa regola
+    # delle rispettive sponda/preavviso sull'attiva (BRT groupage / Freight Code BKL).
     "Facchinaggio",
     "Consegna Ai Piani",
     "Consegna Tassativa",
     "Mancato Ritiro",
-    "Preavviso Telefonico",
     "Porto Assegnato",
     "Reso Al Mittente",
 ]
@@ -2027,7 +2027,9 @@ class MacspedPassiveRateCard:
         if flag_enabled(shipment_row, flags, "Mancato Ritiro"):
             extras.append(("Mancato ritiro", capped(10.00 * quintals)))
 
-        if flag_enabled(shipment_row, flags, "Preavviso Telefonico"):
+        # Preavviso telefonico: automatico, stessa regola della "Phone preadvise BKL"
+        # sull'attiva (Freight Code BKL, esclusi GDO e Amazon) - nessuna spunta manuale.
+        if has_freight_code(shipment_row, "BKL") and not gdo_flagged and not amazon:
             extras.append(("Preavviso telefonico", 2.00))
 
         if flag_enabled(shipment_row, flags, "Porto Assegnato"):
