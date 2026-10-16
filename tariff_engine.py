@@ -215,9 +215,11 @@ DEFAULT_PASSIVE_FUEL_RATE = 0.02
 #   - nolo base: l'indice si applica solo sul 75% del nolo (il restante 25% e'
 #     la quota carburante, gestita a parte con il fuel surcharge);
 #   - extra:     l'indice si applica sul 100% dell'importo di ogni extra.
-# L'indice vale dalla competenza di luglio 2026, il mese in cui e' stato introdotto nel
-# programma (1 luglio 2026): maggio e giugno erano stati calcolati e fatturati senza indice.
-ACTIVE_ISTAT_START = date(2026, 7, 1)
+# L'indice vale dalla competenza di giugno 2026: e' stato introdotto nel programma il 1 luglio
+# 2026 e la fattura di giugno, emessa dopo, lo contiene gia' (il cliente lo conferma: i suoi
+# conti di giugno tornano al centesimo solo con l'indice). Maggio era stato fatturato prima,
+# senza indice.
+ACTIVE_ISTAT_START = date(2026, 6, 1)
 ACTIVE_ISTAT_INDEX_RATE = 0.0139
 ACTIVE_ISTAT_BASE_FRACTION = 0.75
 ACTIVE_ISTAT_BASE_FACTOR = 1 + ACTIVE_ISTAT_INDEX_RATE * ACTIVE_ISTAT_BASE_FRACTION  # 1.010425
@@ -2299,7 +2301,7 @@ def apply_tariffs_to_shipments(
     e' GDO (False). Senza funzione la distinzione vale sempre.
 
     `istat_rule(row)` stabilisce se per quella spedizione vale l'indice ISTAT (competenza da
-    luglio 2026). Senza funzione l'indice vale sempre.
+    giugno 2026). Senza funzione l'indice vale sempre.
 
     `chain_names=False` limita il riconoscimento GDO ai soli clienti del file anagrafica (niente
     catene riconosciute dal nome): serve al ricalcolo delle note di credito sui mesi passati.
